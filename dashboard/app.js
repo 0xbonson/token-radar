@@ -47,6 +47,9 @@ const elements = {
   detailBody: document.getElementById('detail-body'),
   asof: document.getElementById('asof'),
   modelTerms: document.getElementById('model-terms'),
+  candidateRows: document.getElementById('candidate-rows'),
+  categoryRows: document.getElementById('category-rows'),
+  cohortRows: document.getElementById('cohort-rows'),
 };
 
 /** Fill the two filter menus from the data itself, so they always match the board. */
@@ -139,6 +142,11 @@ function boardRow(row) {
   age.textContent = days(row.age_days);
   tr.appendChild(age);
 
+  const capture = document.createElement('td');
+  capture.className = 'num';
+  capture.textContent = `${(row.capture_rate * 100).toFixed(0)}%`;
+  tr.appendChild(capture);
+
   const odds = document.createElement('td');
   odds.className = 'num';
   const oddsCell = document.createElement('div');
@@ -158,6 +166,12 @@ function boardRow(row) {
   value.className = 'num value';
   value.textContent = money(row.implied_value_usd);
   tr.appendChild(value);
+
+  const farm = document.createElement('td');
+  farm.className = 'num';
+  farm.textContent = `${(row.value_per_dollar * 100).toFixed(0)}%`;
+  farm.title = row.verdict;
+  tr.appendChild(farm);
 
   tr.addEventListener('click', () => openDetail(row.slug));
   return tr;
@@ -200,37 +214,13 @@ function drawLive() {
     `and not the model's. The board above ranks only the pre-token ones.`;
 }
 
-/** The farm plan of one protocol, built from its own record. */
+/** The farm plan of one protocol: the board's own steps, with their costs and times. */
 function farmSteps(row) {
-  const chain = row.chains.length > 0 ? row.chains[0] : 'its main chain';
-  const capital = row.tvl_usd >= 2_000_000_000 ? 400 : row.tvl_usd >= 500_000_000 ? 250 : row.tvl_usd >= 100_000_000 ? 150 : 100;
-  const hold = row.age_days === null ? 45 : row.age_days < 180 ? 60 : row.age_days < 365 ? 45 : 30;
-  const category = (row.category ?? '').toLowerCase();
-  let action = `Deposit $${capital} of USDC into ${row.name} on ${chain} and keep the position open.`;
-  if (/perpetual|derivative|basis|options/.test(category)) {
-    action = `Post $${capital} of margin on ${row.name} on ${chain} and hold one small position open for the window.`;
-  } else if (/lending|^cdp|collateral/.test(category)) {
-    action = `Supply $${capital} of USDC to ${row.name} on ${chain}, borrow against part of it, and keep the position open.`;
-  } else if (/dex|liquidity manager/.test(category)) {
-    action = `Provide $${capital} of liquidity to ${row.name}'s deepest pool on ${chain} and keep the position open.`;
-  } else if (/bridge/.test(category)) {
-    action = `Bridge $${capital} of USDC to ${chain} through ${row.name} and use the bridged funds inside its own app.`;
-  } else if (/staking|restak/.test(category)) {
-    action = `Stake $${capital} of the chain's staking asset through ${row.name} and keep the receipt.`;
-  } else if (/yield aggregator|allocator|curator/.test(category)) {
-    action = `Deposit $${capital} into a ${row.name} vault on ${chain} and hold the shares.`;
-  } else if (/rwa/.test(category)) {
-    action = `Mint $${capital} of the protocol's yield asset on ${chain} and hold it to the redemption date.`;
-  }
-
-  return [
-    { text: 'Open a fresh wallet that holds only the money you plan to farm, and keep its seed phrase offline.', cost: `under $3 for the first transaction`, time: '5 minutes' },
-    { text: action, cost: `$${capital} of capital and about $${capital >= 250 ? 8 : 5} of gas`, time: '15 minutes to set up' },
-    { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
-    { text: `Hold the position for at least ${hold} days, so the activity is counted in more than one weekly snapshot.`, cost: `the $${capital} stays in the position`, time: `${hold} days` },
-    { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link the protocol publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-    { text: 'Write the wallet, the dates and every transaction in a farm log, so you can repeat the position or unwind it cleanly.', cost: 'nothing but the log', time: '5 minutes' },
-  ];
+  return row.farm_steps.map((text) => {
+    const parts = text.match(/^(.*) Cost: (.*)\. Time: (.*)\.$/s);
+    if (!parts) return { text, cost: '', time: '' };
+    return { text: parts[1], cost: parts[2], time: parts[3] };
+  });
 }
 
 /** The detail view of one protocol: its numbers, then its farm plan. */
@@ -242,7 +232,7 @@ function openDetail(slug) {
   const steps = farmSteps(row);
   elements.detailBody.innerHTML = `
     <h2>${row.name}</h2>
-    <p class="sub">${row.category ?? 'Uncategorised'} · ${row.slug}</p>
+    <p class="sub">${row.category ?? 'Uncategorised'} &middot; ${row.slug}</p>
     <div class="stat-row">
       <div class="stat"><span>Implied value</span><strong class="value">${money(row.implied_value_usd)}</strong></div>
       <div class="stat"><span>TVL</span><strong>${money(row.tvl_usd)}</strong></div>
@@ -251,16 +241,24 @@ function openDetail(slug) {
     </div>
     <h3>How the value was reached</h3>
     <p class="note">
-      ${money(row.tvl_usd)} of TVL &times; ${Math.round(row.implied_value_usd / Math.max(row.tvl_usd, 1) * 10000) / 100}%
-      of that value, at ${Math.round(row.launch_odds * 100)}% launch odds.
+      ${money(row.tvl_usd)} of TVL &times; a ${(row.capture_rate * 100).toFixed(0)}% capture rate is
+      ${money(row.value_if_launched_usd)} if the token issued, and the odds of it issuing are
+      ${Math.round(row.launch_odds * 100)}% &mdash; the issue rate of the ${row.comparable_peers}
+      protocols in this category, tilted by the cohort this one is in.
       ${row.change_7d === null ? '' : `Seven-day change ${percent(row.change_7d)}.`}
       ${row.age_days === null ? 'Age unknown.' : `Running ${days(row.age_days)}.`}
     </p>
     <h3>Chains</h3>
-    <div class="chains">${row.chains.map((chain) => `<span class="pill">${chain}</span>`).join('') || '<span class="pill">—</span>'}</div>
+    <div class="chains">${row.chains.map((chain) => `<span class="pill">${chain}</span>`).join('') || '<span class="pill">&mdash;</span>'}</div>
     <h3>How to farm it</h3>
+    <p class="note">
+      $${row.capital_usd} of capital, about $${row.gas_usd} of gas, ${row.days} days:
+      $${row.cost_usd} in total. At ${row.comparable_peers} peers' issue rate that position is worth
+      about $${row.expected_value_usd.toFixed(2)} of the implied value, so
+      <strong>${row.verdict}</strong>.
+    </p>
     <ol class="steps">
-      ${steps.map((step) => `<li>${step.text} <b>${step.cost}</b> · ${step.time}.</li>`).join('')}
+      ${steps.map((step) => `<li>${step.text} <b>${step.cost}</b> &middot; ${step.time}.</li>`).join('')}
     </ol>
   `;
   elements.detail.hidden = false;
@@ -271,23 +269,88 @@ function closeDetail() {
   state.selected = null;
 }
 
-/** The model page: the constants the board ran on. */
+/** The model page: what the board was fitted on, and how it did out of sample. */
 function drawModel() {
   const model = radar.model;
   const terms = [
-    ['tvl_value', model.tvl_value],
-    ['growth_weight', model.growth_weight],
-    ['growth_cap', `${model.growth_cap}%`],
-    ['peak_age_days', `${model.peak_age_days} days`],
-    ['age_spread_days', `${model.age_spread_days} days`],
-    ['odds_floor', `${Math.round(model.odds_floor * 100)}%`],
-    ['odds_cap', `${Math.round(model.odds_cap * 100)}%`],
-    ['chain_drag_pct', `${model.chain_drag_pct}% per extra chain`],
-    ['chain_drag_after', `${model.chain_drag_after} chains`],
-    ['model_version', radar.model_version],
-    ['snapshot', `${radar.as_of} · ${radar.board_size} rows · ${radar.early_size} early`],
+    ['model version', model.version],
+    ['snapshot', model.as_of],
+    ['tokens already trading', `${model.comparable_count} protocols`],
+    ['protocols read', `${model.universe_count} protocols`],
+    ['global capture rate', `${(model.global_capture_rate * 100).toFixed(0)}%`],
+    ['global issue rate', `${(model.global_issuance_rate * 100).toFixed(1)}%`],
+    ['capture band', `${(model.capture_rate_min * 100).toFixed(1)}% to ${(model.capture_rate_max * 100).toFixed(0)}%`],
+    ['growth tilt, low', `${(model.growth_tilt.low * 100).toFixed(1)}%`],
+    ['growth tilt, mid', `${(model.growth_tilt.mid * 100).toFixed(1)}%`],
+    ['growth tilt, high', `${(model.growth_tilt.high * 100).toFixed(1)}%`],
+    ['chosen model', model.chosen.name],
+    ['chosen reads', model.chosen.features],
+    ['chosen LOO median error', `${model.chosen.loo_median_ape}%`],
+    ['board rows', `${radar.board_size} (${radar.early_size} below the floor)`],
+    ['watchlist covered', `${radar.watchlist_size} of ${radar.watchlist_size}`],
   ];
   elements.modelTerms.innerHTML = terms.map(([name, value]) => `<dt>${name}</dt><dd>${value}</dd>`).join('');
+
+  document.getElementById('model-asof').textContent = model.as_of;
+  document.getElementById('model-comps').textContent = String(model.comparable_count);
+  document.getElementById('model-notes').textContent = model.notes;
+
+  elements.candidateRows.replaceChildren(
+    ...model.candidates.map((candidate) => {
+      const tr = document.createElement('tr');
+      if (candidate.chosen) tr.className = 'chosen';
+      const name = document.createElement('td');
+      name.textContent = candidate.chosen ? `${candidate.name} \u2713` : candidate.name;
+      const reads = document.createElement('td');
+      reads.textContent = candidate.features;
+      const med = document.createElement('td');
+      med.className = 'num';
+      med.textContent = `${candidate.loo_median_ape}%`;
+      const mean = document.createElement('td');
+      mean.className = 'num';
+      mean.textContent = `${candidate.loo_mean_ape}%`;
+      tr.append(name, reads, med, mean);
+      return tr;
+    }),
+  );
+
+  elements.categoryRows.replaceChildren(
+    ...model.categories.map((category) => {
+      const tr = document.createElement('tr');
+      const name = document.createElement('td');
+      name.textContent = category.category;
+      const total = document.createElement('td');
+      total.className = 'num';
+      total.textContent = String(category.protocols);
+      const token = document.createElement('td');
+      token.className = 'num';
+      token.textContent = String(category.with_token);
+      const rate = document.createElement('td');
+      rate.className = 'num';
+      rate.textContent = `${(category.smoothed_rate * 100).toFixed(1)}%`;
+      tr.append(name, total, token, rate);
+      return tr;
+    }),
+  );
+
+  elements.cohortRows.replaceChildren(
+    ...model.cohorts.map((cohort) => {
+      const tr = document.createElement('tr');
+      const name = document.createElement('td');
+      name.textContent = cohort.cohort;
+      const total = document.createElement('td');
+      total.className = 'num';
+      total.textContent = String(cohort.protocols);
+      const token = document.createElement('td');
+      token.className = 'num';
+      token.textContent = String(cohort.with_token);
+      const rate = document.createElement('td');
+      rate.className = 'num';
+      rate.textContent = `${(cohort.rate * 100).toFixed(1)}%`;
+      tr.append(name, total, token, rate);
+      return tr;
+    }),
+  );
 }
 
 /** Switch the visible view. */
@@ -317,6 +380,17 @@ function readHash() {
       elements.q.value = slug;
       drawBoard();
       openDetail(slug);
+    }
+    return;
+  }
+  if (hash.startsWith('view/')) {
+    // A view link may carry a scroll target, as #view/model@y=900, so a reader can share the exact
+    // part of the page they are looking at.
+    const [view, at] = hash.slice(5).split('@y=');
+    if (view === 'board' || view === 'live' || view === 'model') showView(view);
+    if (at !== undefined) {
+      const target = Number(at);
+      if (Number.isFinite(target)) window.scrollTo(0, target);
     }
     return;
   }

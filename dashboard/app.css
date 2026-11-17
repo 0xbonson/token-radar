@@ -292,3 +292,44 @@ tbody tr:last-child td { border-bottom: none; }
 .steps b { color: var(--ink); font-weight: 600; }
 
 .chains { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+
+/* The model page: how the board was fitted, and how it did out of sample. */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+  align-items: start;
+}
+
+table.compact th,
+table.compact td {
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+table.compact tr.chosen td {
+  color: var(--accent);
+  background: rgba(79, 209, 197, 0.08);
+}
+
+table.compact tr.chosen td:first-child {
+  font-weight: 600;
+}
+
+.formula {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--gold);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 14px 0 18px;
+  font-size: 14px;
+  display: inline-block;
+}
+
+.obligations {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+}
