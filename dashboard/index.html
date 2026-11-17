@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar</title>
+<link rel="stylesheet" href="./app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="mark"></span>
+    <div>
+      <h1>Token Radar</h1>
+      <p class="tagline" id="asof">Loading the snapshot&hellip;</p>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-view="board" role="tab">Pre-token board</button>
+    <button class="tab" data-view="live" role="tab">Live tokens</button>
+    <button class="tab" data-view="model" role="tab">The model</button>
+  </nav>
+</header>
+
+<main>
+  <section class="panel" id="view-board">
+    <div class="controls">
+      <label class="search">
+        <span>Search</span>
+        <input type="search" id="q" placeholder="name, category or chain" autocomplete="off">
+      </label>
+      <label>
+        <span>Category</span>
+        <select id="category"><option value="">All categories</option></select>
+      </label>
+      <label>
+        <span>Chain</span>
+        <select id="chain"><option value="">All chains</option></select>
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="watchlist-only">
+        <span>Watchlist only</span>
+      </label>
+      <label>
+        <span>Sort by</span>
+        <select id="sort">
+          <option value="rank">Implied value</option>
+          <option value="tvl_usd">TVL</option>
+          <option value="change_7d">7-day change</option>
+          <option value="age_days">Time running</option>
+          <option value="launch_odds">Launch odds</option>
+        </select>
+      </label>
+      <p class="count" id="count"></p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-rank">#</th>
+            <th class="col-name">Protocol</th>
+            <th class="col-cat">Category</th>
+            <th class="col-num">TVL</th>
+            <th class="col-num">7d</th>
+            <th class="col-num">Age</th>
+            <th class="col-num">Odds</th>
+            <th class="col-num">Implied value</th>
+          </tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" id="view-live" hidden>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="col-name">Protocol</th>
+            <th class="col-cat">Category</th>
+            <th class="col-num">TVL</th>
+            <th class="col-num">Market cap</th>
+            <th class="col-num">TVL / cap</th>
+            <th class="col-num">7d</th>
+          </tr>
+        </thead>
+        <tbody id="live-rows"></tbody>
+      </table>
+    </div>
+    <p class="note" id="live-note"></p>
+  </section>
+
+  <section class="panel" id="view-model" hidden>
+    <h2>How the board is built</h2>
+    <p class="lead">
+      Every row is one protocol from the sealed snapshot. The board asks one question of each:
+      if this protocol issued its token tomorrow, what would that token be worth on the record it has
+      today?
+    </p>
+    <p class="formula">implied value = TVL &times; TVL value &times; capture rate &times; launch odds &times; chain drag</p>
+    <dl class="model" id="model-terms"></dl>
+    <h3>What each term means</h3>
+    <ul class="terms">
+      <li><strong>TVL value</strong> is what a dollar of locked value is worth to a token holder once the protocol keeps its cut. It is the same for every row.</li>
+      <li><strong>Capture rate</strong> is the share of that value a category can ever convert: a derivatives venue keeps a fat fee on turnover, a bridge keeps almost none. It comes from the category the snapshot records, never from the protocol's name.</li>
+      <li><strong>Launch odds</strong> is how likely the token is at all. It is a bell in the protocol's age: a new protocol has not proved itself, one a few years old has, and one a decade old has had its chance. Seven-day growth lifts it, because a protocol that is growing now is one the market is watching.</li>
+      <li><strong>Chain drag</strong> is what a wide footprint costs: a token has to launch on every chain at once, and each extra chain makes that harder.</li>
+    </ul>
+    <p class="note">
+      A board's implied value is its own claim, not make.fun's, and it is not a prediction that a token
+      will be issued or when. Protocols whose token already trades are kept out of the board and shown
+      separately, with the market's own numbers.
+    </p>
+  </section>
+</main>
+
+<aside class="detail" id="detail" hidden>
+  <button class="close" id="close-detail" aria-label="Close">&times;</button>
+  <div id="detail-body"></div>
+</aside>
+
+<script src="../data.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
