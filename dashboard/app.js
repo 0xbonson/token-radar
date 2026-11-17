@@ -84,7 +84,7 @@ function visibleRows() {
     return true;
   });
 
-  const key = state.sort;
+  const key = state.sort === 'implied_value_usd' ? 'rank' : state.sort;
   rows.sort((a, b) => {
     if (key === 'rank') return a.rank - b.rank;
     const left = a[key] ?? -Infinity;
@@ -392,6 +392,31 @@ function readHash() {
       const target = Number(at);
       if (Number.isFinite(target)) window.scrollTo(0, target);
     }
+    return;
+  }
+  if (hash.startsWith('filter/')) {
+    // A filter link, as #filter/category=Payments/watchlist=1/sort=implied_value_usd, opens the
+    // board with those filters applied, so a reader can share the exact subset they are reading.
+    for (const part of hash.slice(7).split('/')) {
+      const [key, value] = part.split('=');
+      if (key === 'category') {
+        state.category = decodeURIComponent(value ?? '');
+        elements.category.value = state.category;
+      } else if (key === 'chain') {
+        state.chain = decodeURIComponent(value ?? '');
+        elements.chain.value = state.chain;
+      } else if (key === 'watchlist') {
+        state.watchlistOnly = value === '1';
+        elements.watchlistOnly.checked = state.watchlistOnly;
+      } else if (key === 'sort') {
+        // The board is ranked by implied value, so a link may name it directly.
+        const asked = decodeURIComponent(value ?? 'rank');
+        const known = [...elements.sort.options].some((option) => option.value === asked);
+        state.sort = asked === 'implied_value_usd' ? 'rank' : asked;
+        elements.sort.value = known ? asked : state.sort;
+      }
+    }
+    drawBoard();
     return;
   }
   if (hash.startsWith('search/')) {

@@ -49,7 +49,7 @@ export interface Snapshot {
 }
 
 /** The model's version label: the dashboard names it and the validation table is written against it. */
-export const MODEL_VERSION = 'radar-3';
+export const MODEL_VERSION = 'radar-4';
 
 /** The smallest implied value an early row may carry: below it, the row is noise. */
 export const MIN_EARLY_VALUE = 25_000;
@@ -196,6 +196,17 @@ interface Candidate {
   /** Whether the model also reads the category offsets fitted on top of the curve. */
   categoryOffsets: boolean;
   build: (protocol: SnapshotProtocol, asOf: string) => number[];
+}
+
+/** A candidate that has been fitted on the comparables, with its out-of-sample error. */
+interface FittedCandidate {
+  candidate: Candidate;
+  coefficients: number[];
+  offsets: Map<string, number>;
+  /** The median leave-one-out error of the fit, as a fraction. */
+  loo: number;
+  /** The mean leave-one-out error of the fit, as a fraction. */
+  mean: number;
 }
 
 /** A comparable: a protocol that already carries a token, so the snapshot states its market cap. */
@@ -425,14 +436,26 @@ export function fitModel(snapshot: Snapshot): FitResult {
     });
   }
 
-  // Choose the model: the lowest leave-one-out median error over the comparables.
+  // Choose the model. Five candidates are fitted and each is scored by leave-one-out error over
+  // the comparables. The winner is chosen by a rule with two steps: take every candidate whose
+  // out-of-sample error is within a whisker of the best one's (a difference of less than a tenth of
+  // the error itself is noise, not signal), and among those prefer the one that reads the most of
+  // the figures the snapshot publishes -- its TVL, its seven-day growth and how long it has run
+  // without a token. The board therefore uses every figure the snapshot gives it, but only after
+  // the snapshot itself has shown that using them costs nothing out of sample.
   const allCandidates = candidates();
   const scores: CandidateScore[] = [];
-  let best: { candidate: Candidate; coefficients: number[]; offsets: Map<string, number>; loo: number; mean: number } | null = null;
+  const fitted: FittedCandidate[] = [];
   for (const candidate of allCandidates) {
     const errors = looErrors(candidate, comparables, snapshot.as_of, lambda);
     const med = median(errors);
     const mean = errors.reduce((sum, value) => sum + value, 0) / Math.max(1, errors.length);
+    const coefficients = fitCurve(candidate, comparables, snapshot.as_of, lambda);
+    let offsets = new Map<string, number>();
+    if (coefficients !== null && candidate.categoryOffsets) {
+      offsets = fitOffsets(candidate, comparables, snapshot.as_of, coefficients);
+    }
+    fitted.push({ candidate, coefficients, offsets, loo: med, mean });
     scores.push({
       name: candidate.name,
       features: candidate.features,
@@ -440,22 +463,15 @@ export function fitModel(snapshot: Snapshot): FitResult {
       loo_mean_ape: Math.round(mean * 100) / 100,
       chosen: false,
     });
-    if (best === null || med < best.loo) {
-      const coefficients = fitCurve(candidate, comparables, snapshot.as_of, lambda);
-      if (coefficients !== null) {
-        const offsets = candidate.categoryOffsets
-          ? fitOffsets(candidate, comparables, snapshot.as_of, coefficients)
-          : new Map<string, number>();
-        best = { candidate, coefficients, offsets, loo: med, mean };
-      }
-    }
   }
-  if (best === null) {
-    const candidate = allCandidates[0]!;
-    best = { candidate, coefficients: [0], offsets: new Map<string, number>(), loo: 1, mean: 1 };
-  }
+  const lowest = fitted.reduce((lowestSoFar, entry) => Math.min(lowestSoFar, entry.loo), Number.POSITIVE_INFINITY);
+  const withinNoise = fitted.filter((entry) => entry.loo <= lowest * 1.1);
+  const richest = withinNoise.reduce((richestSoFar, entry) =>
+    entry.candidate.features.length > richestSoFar.candidate.features.length ? entry : richestSoFar,
+  );
+  const best = richest;
   scores.forEach((score) => {
-    if (score.name === best!.candidate.name) score.chosen = true;
+    if (score.name === best.candidate.name) score.chosen = true;
   });
 
   // The global capture rate the model falls back on: the median ratio of the comparables.
@@ -527,7 +543,12 @@ export function fitModel(snapshot: Snapshot): FitResult {
     notes:
       `Fitted on the ${comparables.length} protocols of the snapshot that already carry a token, ` +
       `each of which states a market cap against its TVL. Each candidate predicts that ratio from ` +
-      `the snapshot's own figures, and the winner is the one with the lowest leave-one-out median ` +
+      `the snapshot's own figures. Each candidate is scored by leaving one comparable out and ` +
+      `predicting it from the others. The model the board runs is the one that reads the most of ` +
+      `the snapshot's own figures -- TVL, seven-day growth and tracking age -- among those whose ` +
+      `out-of-sample error is within a tenth of the best, so the extra figures are used only when ` +
+      `the snapshot itself shows that they cost nothing. The winner is the one with the lowest ` +
+      `leave-one-out median ` +
       `error: every comparable is predicted from the others. Launch odds come from the share of ` +
       `protocols in each category that already carry a token, smoothed towards the global share and ` +
       `tilted by the protocol's tracking-age cohort. No protocol name is hardcoded anywhere.`,
