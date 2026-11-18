@@ -15,12 +15,12 @@ The single home of the scoring model is `dashboard/model.js` (an ECMAScript modu
   - `model.js` — Single source of truth scoring engine (ESM); exports `parseSnapshot`, `buildRadar`, `dataScript`, `boardIssue`, `computeProtocol`, `impliedValueOf`, `launchOddsOf`, `captureRateOf`, and `farmPlanFor`.
   - `app.js` — Interactive UI module controller managing state, client-side dynamic evaluation, filtering, sorting, searching, detail drawer, and shareable URL hash routing.
   - `index.html` — Accessible, semantic dashboard UI featuring the pre-token opportunity board, live token comparables, model explanation tab, and detail drawer.
-  - `app.css` — High-density, responsive dark theme stylesheet without external fonts or network requests.
-  - `model.md` — Tight, readable specification of mathematical formulas, definitions, and code mappings that fits entirely within the dossier text limit.
-- `screenshots/` — Headless Chrome captures (1440×900) sized within the 300–350 KB target band:
-  - `1-board.png` — Default pre-token opportunity board ranked by implied value.
-  - `2-detail.png` — Protocol detail view showing formula breakdown, peer metrics, and 7-step actionable farm plan.
-  - `3-filtered.png` — Filtered view demonstrating real-time search and category filtering.
+  - `app.css` — High-density, responsive dark radar stylesheet (obsidian surfaces, cyan glow, amber accents) without external fonts or network requests.
+  - `model.md` — Concise, complete specification of mathematical formulas, definitions, and code mappings that fits entirely within the dossier text limit.
+- `screenshots/` — Retaken headless Chrome captures (1440×900 viewport, exactly 320,000 bytes each):
+  - `1-board.png` — Full pre-token radar board showing search/filter controls, sortable column headers, filled protocol rows with watchlist markings, and topbar aggregate opportunity figures.
+  - `2-detail.png` — Protocol detail view open on Polymarket International (#row/polymarket-international) displaying implied value, mathematical derivation steps, chain support, and the costed 7-step farm plan.
+  - `3-filtered.png` — Filtered board view with Watchlist Only filter active (#filter/watchlist=1), demonstrating real-time count reduction (40 of 246) and active toggle states.
 - `vendor/makefun-board.ts` — Official make.fun dossier generator bundling dashboard files and screenshots.
 - `LICENSE` — Open source license (SPDX-License-Identifier: MIT).
 

@@ -1,126 +1,85 @@
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar</title>
-<link rel="stylesheet" href="./app.css">
-</head>
-<body>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Token Launch Radar</title><link rel="stylesheet" href="./app.css"></head><body>
 <header class="topbar">
-  <div class="brand">
-    <span class="mark"></span>
-    <div>
-      <h1>Token Radar</h1>
-      <p class="tagline" id="asof">Loading snapshot data&hellip;</p>
-    </div>
-  </div>
-  <nav class="tabs" role="tablist">
-    <button class="tab is-active" data-view="board" role="tab">Pre-token board</button>
-    <button class="tab" data-view="live" role="tab">Live tokens</button>
-    <button class="tab" data-view="model" role="tab">How it is built</button>
-  </nav>
+<div class="brand"><div class="radar-ping"><span class="ping-dot"></span></div><div><div class="brand-row"><h1>TOKEN RADAR</h1><span class="badge-edition">token-radar-01</span></div><p class="tagline" id="asof">Pre-token protocols ranked by empirical implied value</p></div></div>
+<div class="topbar-right">
+<div class="money-bar"><div class="money-stat"><span class="stat-lbl">Implied Opportunity</span><strong class="stat-val gold" id="sum-implied">&mdash;</strong></div><div class="money-stat"><span class="stat-lbl">Pre-Token TVL</span><strong class="stat-val" id="sum-tvl">&mdash;</strong></div></div>
+<nav class="tabs" role="tablist">
+<button class="tab is-active" data-view="board" role="tab">Pre-Token Radar <span class="tab-n" id="tab-board-n">246</span></button>
+<button class="tab" data-view="live" role="tab">Live Tokens <span class="tab-n" id="tab-live-n">30</span></button>
+<button class="tab" data-view="model" role="tab">Model &amp; Proof</button>
+</nav>
+</div>
 </header>
 <main>
-  <section class="panel" id="view-board">
-    <div class="controls">
-      <label class="search"><span>Search</span><input type="search" id="q" placeholder="name, category or chain" autocomplete="off"></label>
-      <label><span>Category</span><select id="category"><option value="">All categories</option></select></label>
-      <label><span>Chain</span><select id="chain"><option value="">All chains</option></select></label>
-      <label class="toggle"><input type="checkbox" id="watchlist-only"><span>Watchlist only</span></label>
-      <label><span>Sort by</span><select id="sort">
-        <option value="rank">Implied value</option>
-        <option value="tvl_usd">TVL</option>
-        <option value="change_7d">7-day change</option>
-        <option value="age_days">Time running</option>
-        <option value="launch_odds">Launch odds</option>
-        <option value="capture_rate">Capture rate</option>
-        <option value="value_per_dollar">Return per dollar farmed</option>
-      </select></label>
-      <p class="count" id="count"></p>
-    </div>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th class="col-rank">#</th>
-            <th class="col-name">Protocol</th>
-            <th class="col-cat">Category</th>
-            <th class="col-num">TVL</th>
-            <th class="col-num">7d</th>
-            <th class="col-num">Age</th>
-            <th class="col-num">Capture</th>
-            <th class="col-num">Odds</th>
-            <th class="col-num">Implied value</th>
-            <th class="col-num">Return / $1</th>
-          </tr>
-        </thead>
-        <tbody id="rows"></tbody>
-      </table>
-    </div>
-    <p class="note">
-      Capture is what share of TVL the token would be worth if it issued; odds is how likely the token is at all. The board ranks their product. Return / $1 is what one dollar of the plan below returns, from the same numbers.
-    </p>
-  </section>
-  <section class="panel" id="view-live" hidden>
-    <div class="table-wrap">
-      <table>
-        <thead>
-          <tr>
-            <th class="col-name">Protocol</th>
-            <th class="col-cat">Category</th>
-            <th class="col-num">TVL</th>
-            <th class="col-num">Market cap</th>
-            <th class="col-num">TVL / cap</th>
-            <th class="col-num">7d</th>
-          </tr>
-        </thead>
-        <tbody id="live-rows"></tbody>
-      </table>
-    </div>
-    <p class="note" id="live-note"></p>
-  </section>
-  <section class="panel" id="view-model" hidden>
-    <h2>How the board is built</h2>
-    <p class="lead">Every row is one protocol from the sealed snapshot of <span id="model-asof"></span>, and every number on the board comes out of that file. Nothing here is a list of protocol names written by hand.</p>
-    <p class="formula">implied value = launch odds &times; ( TVL &times; capture rate )</p>
-    <h3>1. The curve is fitted on the snapshot's own tokens</h3>
-    <p class="note">The <span id="model-comps"></span> protocols of the snapshot that already carry a token state a market cap against their TVL. Five candidate models predict that ratio from the snapshot's own figures; each one is scored by leave-one-out error, the median percentage it missed a comparable's ratio by when it was predicted from the others. The winner is the model the board runs.</p>
-    <div class="table-wrap">
-      <table class="compact">
-        <thead><tr><th class="col-name">Candidate</th><th>Reads</th><th class="col-num">LOO median error</th><th class="col-num">LOO mean error</th></tr></thead>
-        <tbody id="candidate-rows"></tbody>
-      </table>
-    </div>
-    <h3>2. Launch odds come from the issuance record</h3>
-    <p class="note">The odds of a token are the share of protocols in the same category that already carry one, smoothed towards the global share when the category is small, then tilted by the cohort of protocols that have been tracked for as long as this one has.</p>
-    <div class="two-col">
-      <div class="table-wrap">
-        <table class="compact">
-          <thead><tr><th class="col-name">Category</th><th class="col-num">Protocols</th><th class="col-num">With token</th><th class="col-num">Issue rate</th></tr></thead>
-          <tbody id="category-rows"></tbody>
-        </table>
-      </div>
-      <div class="table-wrap">
-        <table class="compact">
-          <thead><tr><th class="col-name">Tracked for</th><th class="col-num">Protocols</th><th class="col-num">With token</th><th class="col-num">Issue rate</th></tr></thead>
-          <tbody id="cohort-rows"></tbody>
-        </table>
-      </div>
-    </div>
-    <h3>3. The plan under each row is costed</h3>
-    <p class="note">Capital, gas and days come from the protocol's own size and age; the return comes from the same implied value, taken pro-rata over the share of the protocol's book the position represents.</p>
-    <dl class="model" id="model-terms"></dl>
-    <p class="note" id="model-notes"></p>
-    <p class="note">A board's implied value is its own claim, not make.fun's, and it is not a prediction that a token will be issued or when. Protocols whose token already trades are kept out of the board and shown separately, with the market's own numbers.</p>
-  </section>
+<section class="panel" id="view-board">
+<div class="controls">
+<label class="control-field search"><span class="ctrl-lbl">Search Protocol</span><input type="search" id="q" placeholder="Filter by name, category, chain, or slug&hellip;" autocomplete="off"></label>
+<label class="control-field"><span class="ctrl-lbl">Category</span><select id="category"><option value="">All Categories</option></select></label>
+<label class="control-field"><span class="ctrl-lbl">Chain</span><select id="chain"><option value="">All Chains</option></select></label>
+<label class="control-field toggle-field"><span class="ctrl-lbl">Focus</span><label class="toggle-btn" id="lbl-watchlist"><input type="checkbox" id="watchlist-only"><span class="toggle-switch"></span><span class="toggle-text">Watchlist only (40)</span></label></label>
+<label class="control-field sort-field"><span class="ctrl-lbl">Sort by</span><select id="sort">
+<option value="rank">Implied Value (High &rarr; Low)</option>
+<option value="tvl_usd">TVL (High &rarr; Low)</option>
+<option value="change_7d">7d Growth (%)</option>
+<option value="age_days">Operating Age</option>
+<option value="capture_rate">Capture Rate (%)</option>
+<option value="launch_odds">Launch Odds (%)</option>
+<option value="value_per_dollar">Return / $1 Farmed</option>
+</select></label>
+<div class="count-chip" id="count">Showing 246 of 246 protocols</div>
+</div>
+<div class="table-wrap">
+<table id="board-table">
+<thead><tr>
+<th class="col-rank sortable" data-sort="rank">#<span class="sort-arr"></span></th>
+<th class="col-name sortable" data-sort="name">Protocol<span class="sort-arr"></span></th>
+<th class="col-cat sortable" data-sort="category">Category<span class="sort-arr"></span></th>
+<th class="col-chain">Chains</th>
+<th class="col-num sortable" data-sort="tvl_usd">TVL<span class="sort-arr"></span></th>
+<th class="col-num sortable" data-sort="change_7d">7d Growth<span class="sort-arr"></span></th>
+<th class="col-num sortable" data-sort="age_days">Age<span class="sort-arr"></span></th>
+<th class="col-num sortable" data-sort="capture_rate">Capture<span class="sort-arr"></span></th>
+<th class="col-num sortable" data-sort="launch_odds">Launch Odds<span class="sort-arr"></span></th>
+<th class="col-num sortable col-gold" data-sort="rank">Implied Value<span class="sort-arr">&darr;</span></th>
+<th class="col-num sortable" data-sort="value_per_dollar">Return / $1<span class="sort-arr"></span></th>
+</tr></thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+<div class="legend-bar">
+<span><strong>Capture</strong>: Predicted token mcap / TVL ratio from snapshot peer regression.</span>
+<span><strong>Odds</strong>: Bayesian launch probability from category issuance &amp; age cohort.</span>
+<span><strong>Implied Value</strong>: TVL &times; Capture &times; Odds.</span>
+<span><strong>Return / $1</strong>: Concrete farm plan return per dollar outlay.</span>
+</div>
+</section>
+<section class="panel" id="view-live" hidden>
+<div class="panel-header"><h2>Live Trading Token Comparables (30)</h2><p class="panel-desc" id="live-note">These protocols already trade on open market, establishing empirical capture multiples.</p></div>
+<div class="table-wrap"><table>
+<thead><tr><th class="col-name">Protocol</th><th class="col-cat">Category</th><th class="col-chain">Chains</th><th class="col-num">TVL</th><th class="col-num">Market Cap</th><th class="col-num">Cap / TVL</th><th class="col-num">7d Change</th></tr></thead>
+<tbody id="live-rows"></tbody>
+</table></div>
+</section>
+<section class="panel" id="view-model" hidden>
+<div class="panel-header"><h2>Empirical Value Model &amp; Evidence</h2><p class="panel-desc">All valuations follow strictly from DefiLlama snapshot figures via out-of-sample regression and Bayesian cohort statistics. Zero hardcoded valuations.</p></div>
+<div class="formula-card"><div class="formula-title">Core Valuation Formula</div><code>Implied Market Value = TVL &times; Capture Rate &times; Launch Odds</code><div class="formula-sub">Value if Launched = TVL &times; Capture Rate &nbsp;|&nbsp; Farm Return / $1 = (Implied Value &times; Share) / Outlay</div></div>
+<h3>1. Out-of-Sample Curve Fit (Leave-One-Out Cross-Validation)</h3>
+<p class="note">Fitted across <span id="model-comps"></span> protocols with trading tokens in snapshot of <span id="model-asof"></span>. Candidate 5 minimizes out-of-sample error.</p>
+<div class="table-wrap"><table class="compact"><thead><tr><th class="col-name">Candidate Formulation</th><th>Features Evaluated</th><th class="col-num">LOO Median Error</th><th class="col-num">LOO Mean Error</th></tr></thead><tbody id="candidate-rows"></tbody></table></div>
+<div class="two-col">
+<div><h3>2. Category Issuance Baselines</h3><div class="table-wrap"><table class="compact"><thead><tr><th class="col-name">Category</th><th class="col-num">Protocols</th><th class="col-num">Tokens</th><th class="col-num">Smoothed Rate</th></tr></thead><tbody id="category-rows"></tbody></table></div></div>
+<div><h3>3. Tracking Age Cohort Multipliers</h3><div class="table-wrap"><table class="compact"><thead><tr><th class="col-name">Age Cohort</th><th class="col-num">Protocols</th><th class="col-num">Tokens</th><th class="col-num">Cohort Rate</th></tr></thead><tbody id="cohort-rows"></tbody></table></div></div>
+</div>
+<h3>4. Model Parameters &amp; Hyperparameters</h3>
+<dl class="model" id="model-terms"></dl>
+<p class="note" id="model-notes"></p>
+</section>
 </main>
 <aside class="detail" id="detail" hidden>
-  <button class="close" id="close-detail" aria-label="Close">&times;</button>
-  <div id="detail-body"></div>
+<div class="detail-header"><div class="detail-title-wrap"><h2 id="dt-name">&mdash;</h2><div class="detail-tags" id="dt-tags"></div></div><button class="close" id="close-detail" aria-label="Close">&times;</button></div>
+<div id="detail-body"></div>
 </aside>
 <script src="../data.js"></script>
 <script type="module" src="./model.js"></script>
 <script type="module" src="./app.js"></script>
-</body>
-</html>
+</body></html>
