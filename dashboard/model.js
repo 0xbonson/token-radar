@@ -1,386 +1,508 @@
-// The radar's scoring model: evaluates pre-token DeFi protocols from raw snapshot figures.
-// Runs natively in the browser and in Node.js with zero external dependencies.
+// Token Radar scoring engine (ECMAScript Module)
+// Grounded in empirical DeFi token issuance and valuation metrics.
 // SPDX-License-Identifier: MIT
 
-const DAY_MS = 86400000;
+const MS_PER_DAY = 86_400_000;
 
-/**
- * Operating age of a protocol in days.
- * Reads: snapshot date `asOf` (YYYY-MM-DD) and protocol `listed_at` (YYYY-MM-DD).
- */
-function ageDays(asOf, listedAt) {
+export const AGE_COHORTS = [
+  { cohort: '0-180d', min: 0, max: 180 },
+  { cohort: '180-365d', min: 180, max: 365 },
+  { cohort: '365-730d', min: 365, max: 730 },
+  { cohort: '730-1460d', min: 730, max: 1460 },
+  { cohort: '1460d+', min: 1460, max: Infinity },
+];
+
+export class SnapshotError extends Error {
+  constructor(msg) { super(msg); this.name = 'SnapshotError'; }
+}
+
+const safeNum = (v, d = 0) => typeof v === 'number' && Number.isFinite(v) ? v : d;
+
+export function ageDays(asOf, listedAt) {
   if (!listedAt) return null;
-  const a = Date.parse(asOf + 'T00:00:00Z');
-  const b = Date.parse(listedAt + 'T00:00:00Z');
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  return Math.max(0, Math.floor((a - b) / DAY_MS));
+  const a = Date.parse(`${asOf}T00:00:00Z`), b = Date.parse(`${listedAt}T00:00:00Z`);
+  return Number.isFinite(a) && Number.isFinite(b) ? Math.max(0, Math.floor((a - b) / MS_PER_DAY)) : null;
 }
 
-/**
- * Historical token issuance rate for tracking-age cohorts.
- * Reads: protocol tracking age in days mapped into the snapshot's 5 age cohorts.
- */
-function cohortLaunchRate(age, stats) {
-  if (age === null || !stats || !stats.cohorts) return stats ? stats.global_issuance_rate : 0.1695;
-  const cohort = stats.cohorts.find(function (c) {
-    const min = c.min_days !== undefined ? c.min_days : c.min;
-    const max = c.max_days !== undefined ? c.max_days : (c.max === undefined ? -1 : c.max);
-    return age >= min && (max === -1 || max === Infinity || age < max);
-  });
-  return cohort && cohort.protocols > 0 ? cohort.rate : stats.global_issuance_rate;
+function computeMedian(series) {
+  if (!series?.length) return 0;
+  const s = [...series].sort((a, b) => a - b), m = s.length >> 1;
+  return s.length % 2 === 1 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-/**
- * Historical token issuance rate for protocol category, smoothed towards the global rate.
- * Reads: protocol DefiLlama `category` from snapshot.
- */
-function categoryLaunchRate(category, stats) {
-  if (!stats) return 0.1695;
-  const key = category || 'Uncategorised';
-  const entry = stats.category_rates_map ? stats.category_rates_map[key] : null;
-  if (entry && entry.smoothed_rate !== undefined) return entry.smoothed_rate;
-  if (stats.categories) {
-    const found = stats.categories.find(function (c) { return c.category === key; });
-    if (found && found.smoothed_rate !== undefined) return found.smoothed_rate;
+function solveLinearSystem(aug) {
+  const n = aug.length, m = aug.map((r, i) => [...r, aug[i][n]]);
+  for (let c = 0; c < n; c++) {
+    let p = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(m[r][c]) > Math.abs(m[p][c])) p = r;
+    if (Math.abs(m[p][c]) < 1e-12) return null;
+    [m[c], m[p]] = [m[p], m[c]];
+    for (let r = c + 1; r < n; r++) {
+      const q = m[r][c] / m[c][c];
+      for (let j = c; j <= n; j++) m[r][j] -= q * m[c][j];
+    }
   }
-  return stats.global_issuance_rate || 0.1695;
-}
-
-/**
- * Issuance rate tilt across 7-day TVL change terciles (low / mid / high).
- * Reads: protocol `change_7d` percentage growth figure from snapshot.
- */
-function growthTiltOf(change7d, stats) {
-  const g = typeof change7d === 'number' && Number.isFinite(change7d) ? change7d : 0;
-  const group = g < 0 ? 'low' : g > 0 ? 'high' : 'mid';
-  if (stats && stats.growth_tilt && stats.growth_tilt[group] !== undefined) {
-    const rate = stats.growth_tilt[group];
-    const globalRate = stats.global_issuance_rate || 0.1695;
-    return globalRate > 0 ? rate / globalRate : 1;
+  const x = new Array(n).fill(0);
+  for (let i = n - 1; i >= 0; i--) {
+    let sum = m[i][n];
+    for (let j = i + 1; j < n; j++) sum -= m[i][j] * x[j];
+    x[i] = sum / m[i][i];
   }
-  return 1;
+  return x;
 }
 
-/**
- * Launch odds: how likely the protocol is to issue a token.
- * Reads: protocol `category`, `listed_at` (age), and `change_7d` (growth).
- */
-function launchOddsOf(protocol, stats, asOf) {
-  const categoryRate = categoryLaunchRate(protocol.category, stats);
-  const age = ageDays(asOf, protocol.listed_at);
-  const cohortRate = cohortLaunchRate(age, stats);
-  const globalRate = stats && stats.global_issuance_rate ? stats.global_issuance_rate : 0.1695;
-  let cohortTilt = 1;
-  if (age !== null && globalRate > 0) {
-    cohortTilt = Math.max(0.4, Math.min(2.5, cohortRate / globalRate));
+function fitRidgeRegression(X, y, penalty) {
+  const p = X[0].length, sys = Array.from({ length: p }, () => new Array(p + 1).fill(0));
+  for (let i = 0; i < p; i++) {
+    for (let k = 0; k < X.length; k++) {
+      sys[i][p] += X[k][i] * y[k];
+      for (let j = 0; j < p; j++) sys[i][j] += X[k][i] * X[k][j];
+    }
+    if (i > 0) sys[i][i] += penalty * X.length * 0.01;
   }
-  const growthTilt = Math.max(0.4, Math.min(2.5, growthTiltOf(protocol.change_7d, stats)));
-  const odds = Math.max(0.005, Math.min(0.95, categoryRate * cohortTilt * growthTilt));
-  return {
-    odds: Math.round(odds * 1e4) / 1e4,
-    categoryRate: Math.round(categoryRate * 1e4) / 1e4,
-    cohortRate: Math.round(cohortRate * 1e4) / 1e4,
-  };
+  return solveLinearSystem(sys);
 }
 
-/**
- * Category-specific capture rate offset fitted on comparable protocols.
- * Reads: protocol DefiLlama `category` from snapshot.
- */
-function categoryCaptureRate(category, stats) {
-  if (!stats || !stats.category_offsets) return 0;
-  const key = category || 'Uncategorised';
-  return stats.category_offsets[key] || 0;
-}
+const VERSIONED_RE = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
+export const isPreToken = (p) => p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
+export const isRankable = (p) => isPreToken(p) && p.category !== 'CEX' && !VERSIONED_RE.test(p.name);
 
-/**
- * Capture rate: what share of TVL the token would be worth if issued.
- * Reads: protocol `tvl_usd`, `change_7d`, `listed_at` (age), and `category`.
- */
-function captureRateOf(protocol, stats, asOf) {
-  const logTvl = Math.log10(Math.max(1, protocol.tvl_usd || 1));
-  const g = typeof protocol.change_7d === 'number' && Number.isFinite(protocol.change_7d) ? protocol.change_7d : 0;
-  const growth = g / 25;
-  const age = ageDays(asOf, protocol.listed_at);
-  const trackAge = (age !== null ? age : 540) / 1000;
-  const coeffs = stats && stats.coefficients ? stats.coefficients : [3.01459, -0.46817, -0.08012, -0.11999];
-  const curve = coeffs[0] + coeffs[1] * logTvl + coeffs[2] * growth + coeffs[3] * trackAge;
-  const offset = categoryCaptureRate(protocol.category, stats);
-  const rate = Math.pow(10, curve + offset);
-  const minBound = stats && stats.capture_rate_min !== undefined ? stats.capture_rate_min : 0.0059;
-  const maxBound = stats && stats.capture_rate_max !== undefined ? stats.capture_rate_max : 14.5468;
-  const bounded = Math.min(maxBound, Math.max(minBound, rate));
-  const key = protocol.category || 'Uncategorised';
-  const entry = stats && stats.category_rates_map ? stats.category_rates_map[key] : null;
-  const peers = entry ? entry.protocols : (stats && stats.categories ? (stats.categories.find(function (c) { return c.category === key; }) || {}).protocols || 0 : 0);
-  const trust = Math.min(0.8, peers / (peers + 8));
-  const globalCap = stats && stats.global_capture_rate !== undefined ? stats.global_capture_rate : 0.246;
-  const finalRate = bounded * trust + globalCap * (1 - trust);
-  return Math.round(finalRate * 1e4) / 1e4;
-}
+const logScaleTvl = (p) => Math.log10(Math.max(1, p.tvl_usd));
+const scaledGrowth = (p) => safeNum(p.change_7d, 0) / 25;
+const trackingYears = (p, asOf) => (ageDays(asOf, p.listed_at) ?? 540) / 1000;
 
-/**
- * Implied value of the pre-token protocol.
- * Reads: protocol `tvl_usd` multiplied by capture rate and launch odds.
- */
-function impliedValueOf(protocol, stats, asOf) {
-  const capture = captureRateOf(protocol, stats, asOf);
-  const oddsResult = launchOddsOf(protocol, stats, asOf);
-  const valueIfLaunched = Math.max(1, Math.round((protocol.tvl_usd || 0) * capture));
-  const implied = Math.max(1, Math.round(valueIfLaunched * oddsResult.odds));
-  return {
-    impliedValue: implied,
-    valueIfLaunched: valueIfLaunched,
-    capture: capture,
-    odds: oddsResult.odds,
-    categoryRate: oddsResult.categoryRate,
-    cohortRate: oddsResult.cohortRate,
-  };
-}
-
-/**
- * Capital required for farming position, staged by protocol TVL.
- * Reads: protocol `tvl_usd`.
- */
-function capitalFor(protocol) {
-  const tvl = protocol.tvl_usd || 0;
-  if (tvl >= 2000000000) return 400;
-  if (tvl >= 500000000) return 250;
-  if (tvl >= 100000000) return 150;
-  if (tvl >= 50000000) return 100;
-  return 50;
-}
-
-/**
- * Farming hold duration in days, staged by protocol age.
- * Reads: protocol tracking age in days.
- */
-function holdDaysFor(age) {
-  if (age === null) return 45;
-  if (age < 180) return 60;
-  if (age < 365) return 45;
-  return 30;
-}
-
-/**
- * Estimated gas cost over farming window.
- * Reads: allocated capital and planned hold duration.
- */
-function gasFor(capital, days) {
-  const perAction = capital >= 250 ? 8 : capital >= 100 ? 5 : 3;
-  const actions = Math.max(1, Math.round(days / 7));
-  return perAction * actions + 3;
-}
-
-/**
- * Primary network chain for interaction.
- * Reads: protocol `chains` array.
- */
-function chainOf(protocol) {
-  return protocol.chains && protocol.chains.length > 0 ? protocol.chains[0] : 'its main chain';
-}
-
-/**
- * Tailored DeFi action description.
- * Reads: protocol `category`, `name`, and primary `chain`.
- */
-function actionFor(protocol, capital, chain) {
-  const cat = (protocol.category || '').toLowerCase();
-  const name = protocol.name;
-  if (/perpetual|derivative|basis trading|options/.test(cat)) {
-    return 'Post $' + capital + ' of margin on ' + name + ' on ' + chain + ' and hold one small position open for the window.';
-  }
-  if (/lending|^cdp|collateral/.test(cat)) {
-    return 'Supply $' + capital + ' of USDC to ' + name + ' on ' + chain + ', borrow against part of it, and keep the position open.';
-  }
-  if (/dex|liquidity manager/.test(cat)) {
-    return 'Provide $' + capital + ' of liquidity to ' + name + '\'s deepest pool on ' + chain + ' and keep the position open.';
-  }
-  if (/bridge/.test(cat)) {
-    return 'Bridge $' + capital + ' of USDC to ' + chain + ' through ' + name + ' and use the bridged funds inside its own app.';
-  }
-  if (/staking|restak/.test(cat)) {
-    return 'Stake $' + capital + ' of the chain\'s staking asset through ' + name + ' and keep the receipt.';
-  }
-  if (/yield aggregator|allocator|curator/.test(cat)) {
-    return 'Deposit $' + capital + ' into a ' + name + ' vault on ' + chain + ' and hold the shares.';
-  }
-  if (/rwa/.test(cat)) {
-    return 'Mint $' + capital + ' of the protocol\'s yield asset on ' + chain + ' and hold it to the redemption date.';
-  }
-  if (/stablecoin|payments/.test(cat)) {
-    return 'Mint $' + capital + ' of the protocol\'s stable asset on ' + chain + ' and hold it in a second wallet.';
-  }
-  if (/insurance/.test(cat)) {
-    return 'Buy $' + capital + ' of cover from ' + name + ' on ' + chain + ' and keep the policy open.';
-  }
-  return 'Deposit $' + capital + ' of USDC into ' + name + ' on ' + chain + ' and keep the position open.';
-}
-
-/**
- * Format step text with Cost and Time bounds.
- */
-function formatStep(text, cost, time) {
-  let res = text + ' Cost: ' + cost + '. Time: ' + time + '.';
-  if (res.length > 600) res = res.slice(0, 596) + '...';
-  if (res.length < 20) res += ' Keep the position and check the protocol\'s own page.';
-  return res;
-}
-
-/**
- * Concrete 7-step farming plan.
- * Reads: protocol record, age, and computed farm parameters.
- */
-function farmSteps(protocol, age, capital, gas, holdDays) {
-  const chain = chainOf(protocol);
+function createCandidateModels() {
   return [
-    formatStep(
-      'Open a fresh wallet that holds only the money you plan to farm, and keep its seed phrase offline and out of the browser.',
-      'under $3 for the first transaction',
-      '5 minutes'
-    ),
-    formatStep(
-      actionFor(protocol, capital, chain),
-      '$' + capital + ' of capital and about $' + Math.round(gas / 2) + ' of gas to set up',
-      '15 minutes to set up'
-    ),
-    formatStep(
-      'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote, so the protocol records activity from you.',
-      'about $2 of gas a week',
-      '10 minutes a week'
-    ),
-    formatStep(
-      'Hold the position for at least ' + holdDays + ' days, so the activity is counted in more than one weekly snapshot.',
-      'the $' + capital + ' stays in the position',
-      holdDays + ' days'
-    ),
-    formatStep(
-      'Before you withdraw, open the protocol\'s own points or rewards page and claim only from the link the protocol publishes.',
-      'no fee to check, and never pay to claim',
-      '10 minutes'
-    ),
-    formatStep(
-      'Sell or unwind the position in one go on a day with little volume, so the price you get is close to the price you saw.',
-      'about $' + Math.round(gas / 2) + ' of gas to unwind',
-      '20 minutes'
-    ),
-    formatStep(
-      'Write the wallet, the dates and every transaction in a farm log, so you can repeat the position or unwind it cleanly.',
-      'nothing but the log',
-      '5 minutes'
-    ),
+    { name: 'one global ratio', features: 'one ratio for the whole set', categoryOffsets: false, build: () => [1] },
+    { name: 'global plus category', features: "one ratio, plus each category's own", categoryOffsets: true, build: () => [1] },
+    { name: 'size curve', features: "log TVL, plus each category's own", categoryOffsets: true, build: (p) => [1, logScaleTvl(p)] },
+    { name: 'size and growth', features: "log TVL, 7-day growth, plus each category's own", categoryOffsets: true, build: (p) => [1, logScaleTvl(p), scaledGrowth(p)] },
+    { name: 'size, growth and age', features: "log TVL, 7-day growth, tracking age, plus each category's own", categoryOffsets: true, build: (p, asOf) => [1, logScaleTvl(p), scaledGrowth(p), trackingYears(p, asOf)] },
   ];
 }
 
-/**
- * Complete costed farming economics for one protocol row.
- * Reads: protocol `tvl_usd`, tracking age, and model implied value.
- */
-function farmPlanFor(protocol, impliedValue, asOf, boardMedianPerDollar) {
+function fitCandidateBeta(cand, data, asOf, penalty) {
+  const X = data.map((d) => cand.build(d.protocol, asOf)), raw = data.map((d) => d.logRatio);
+  const s = [...raw].sort((a, b) => a - b);
+  const lo = s[Math.floor(s.length * 0.05)], hi = s[Math.min(s.length - 1, Math.ceil(s.length * 0.95))];
+  return fitRidgeRegression(X, raw.map((v) => Math.min(hi, Math.max(lo, v))), penalty);
+}
+
+function fitCategoryOffsets(cand, data, asOf, beta) {
+  const res = new Map();
+  for (const d of data) {
+    const pred = cand.build(d.protocol, asOf).reduce((sum, v, k) => sum + v * beta[k], 0);
+    const cat = d.protocol.category ?? 'Uncategorised';
+    if (!res.has(cat)) res.set(cat, []);
+    res.get(cat).push(d.logRatio - pred);
+  }
+  const offsets = new Map();
+  for (const [cat, list] of res) offsets.set(cat, (list.length / (list.length + 3)) * computeMedian(list));
+  return offsets;
+}
+
+function evaluateLooResiduals(cand, data, asOf, penalty) {
+  const errs = [];
+  for (let i = 0; i < data.length; i++) {
+    const sub = data.filter((_, idx) => idx !== i);
+    const beta = fitCandidateBeta(cand, sub, asOf, penalty);
+    if (!beta) { errs.push(1); continue; }
+    const off = cand.categoryOffsets ? fitCategoryOffsets(cand, sub, asOf, beta) : new Map();
+    const vec = cand.build(data[i].protocol, asOf);
+    const pred = vec.reduce((sum, v, k) => sum + v * beta[k], 0) + (off.get(data[i].protocol.category ?? 'Uncategorised') ?? 0);
+    errs.push(Math.abs(Math.pow(10, pred - data[i].logRatio) - 1));
+  }
+  return errs;
+}
+
+function calibrateSnapshot(snapshot) {
+  const comparables = [];
+  for (const p of snapshot.protocols) {
+    if (p.category !== 'CEX' && p.mcap_usd > 0 && p.tvl_usd > 0) {
+      comparables.push({ protocol: p, logRatio: Math.log10(p.mcap_usd / p.tvl_usd) });
+    }
+  }
+
+  const universe = snapshot.protocols.filter((p) => p.category !== 'CEX');
+  const catCounts = new Map(), cohCounts = new Map();
+  let tokenizedTotal = 0;
+
+  for (const p of universe) {
+    const hasToken = p.mcap_usd > 0;
+    if (hasToken) tokenizedTotal++;
+    const cat = p.category ?? 'Uncategorised';
+    const c = catCounts.get(cat) ?? { total: 0, token: 0 };
+    c.total++; if (hasToken) c.token++; catCounts.set(cat, c);
+
+    const age = ageDays(snapshot.as_of, p.listed_at);
+    if (age !== null) {
+      const coh = AGE_COHORTS.find((item) => age >= item.min && age < item.max);
+      if (coh) {
+        const h = cohCounts.get(coh.cohort) ?? { total: 0, token: 0 };
+        h.total++; if (hasToken) h.token++; cohCounts.set(coh.cohort, h);
+      }
+    }
+  }
+
+  const globalIssuanceRate = universe.length ? tokenizedTotal / universe.length : 0;
+  const categoryRates = new Map();
+  for (const [cat, t] of catCounts) {
+    categoryRates.set(cat, {
+      category: cat, protocols: t.total, with_token: t.token,
+      rate: t.total ? t.token / t.total : 0,
+      smoothed_rate: (t.token + 6 * globalIssuanceRate) / (t.total + 6),
+    });
+  }
+
+  const cohortRates = new Map();
+  for (const coh of AGE_COHORTS) {
+    const t = cohCounts.get(coh.cohort) ?? { total: 0, token: 0 };
+    cohortRates.set(coh.cohort, {
+      cohort: coh.cohort, min_days: coh.min, max_days: coh.max === Infinity ? -1 : coh.max,
+      protocols: t.total, with_token: t.token, rate: t.total ? t.token / t.total : 0,
+    });
+  }
+
+  const candidateOutputs = [], candidateScores = [];
+  for (const cand of createCandidateModels()) {
+    const errs = evaluateLooResiduals(cand, comparables, snapshot.as_of, 0.5);
+    const medErr = computeMedian(errs), meanErr = errs.reduce((a, b) => a + b, 0) / Math.max(1, errs.length);
+    const beta = fitCandidateBeta(cand, comparables, snapshot.as_of, 0.5);
+    const offsets = (beta && cand.categoryOffsets) ? fitCategoryOffsets(cand, comparables, snapshot.as_of, beta) : new Map();
+    candidateOutputs.push({ candidate: cand, coefficients: beta, offsets, loo: medErr, mean: meanErr });
+    candidateScores.push({
+      name: cand.name, features: cand.features,
+      loo_median_ape: Math.round(medErr * 1000) / 10, loo_mean_ape: Math.round(meanErr * 100) / 100, chosen: false,
+    });
+  }
+
+  const lowestLoo = candidateOutputs.reduce((min, c) => Math.min(min, c.loo), Infinity);
+  const selected = candidateOutputs
+    .filter((c) => c.loo <= lowestLoo * 1.1)
+    .reduce((best, c) => (c.candidate.features.length > best.candidate.features.length ? c : best));
+
+  for (const s of candidateScores) if (s.name === selected.candidate.name) s.chosen = true;
+
+  const globalCaptureRate = Math.pow(10, computeMedian(comparables.map((c) => c.logRatio)));
+  const ratios = comparables.map((c) => Math.pow(10, c.logRatio)).sort((a, b) => a - b);
+  const captureRateMin = ratios[Math.floor(ratios.length * 0.05)] ?? 0.01;
+  const captureRateMax = ratios[Math.min(ratios.length - 1, Math.ceil(ratios.length * 0.95))] ?? 1;
+
+  const sortedByGrowth = [...universe].sort((a, b) => safeNum(a.change_7d, 0) - safeNum(b.change_7d, 0));
+  const tercileSize = Math.max(1, Math.floor(sortedByGrowth.length / 3));
+  const growthTilt = {};
+  for (const [tier, grp] of [['low', sortedByGrowth.slice(0, tercileSize)], ['mid', sortedByGrowth.slice(tercileSize, tercileSize * 2)], ['high', sortedByGrowth.slice(tercileSize * 2)]]) {
+    let tok = 0;
+    for (const p of grp) if (p.mcap_usd > 0) tok++;
+    growthTilt[tier] = Math.round(((tok + 6 * globalIssuanceRate) / (grp.length + 6)) * 1e4) / 1e4;
+  }
+
+  const modelReport = {
+    version: 'radar-4', as_of: snapshot.as_of, source: snapshot.source,
+    comparable_count: comparables.length, universe_count: universe.length,
+    global_capture_rate: Math.round(globalCaptureRate * 1e4) / 1e4,
+    global_issuance_rate: Math.round(globalIssuanceRate * 1e4) / 1e4,
+    capture_rate_min: Math.round(captureRateMin * 1e4) / 1e4,
+    capture_rate_max: Math.round(captureRateMax * 1e4) / 1e4,
+    growth_tilt: growthTilt,
+    chosen: {
+      name: selected.candidate.name, features: selected.candidate.features,
+      coefficients: selected.coefficients.map((v) => Math.round(v * 1e4) / 1e4),
+      loo_median_ape: Math.round(selected.loo * 1000) / 10,
+      loo_mean_ape: Math.round(selected.mean * 100) / 100,
+    },
+    candidates: candidateScores,
+    categories: [...categoryRates.values()].sort((a, b) => b.protocols - a.protocols || a.category.localeCompare(b.category)),
+    cohorts: [...cohortRates.values()],
+    baseline_loo_median_ape: candidateScores[0]?.loo_median_ape ?? 0,
+    category_offsets: Object.fromEntries(selected.offsets),
+    category_rates_map: Object.fromEntries(categoryRates),
+    cohort_rates_map: Object.fromEntries(cohortRates),
+    coefficients: selected.coefficients,
+  };
+
+  return { report: modelReport, candidate: selected.candidate, coefficients: selected.coefficients, offsets: selected.offsets, categoryRates, cohortRates };
+}
+
+export const categoryCaptureRate = (category, stats) => stats?.category_offsets?.[category ?? 'Uncategorised'] ?? 0;
+
+export function cohortIssuanceRate(age, stats) {
+  if (age === null || age === undefined) return stats?.global_issuance_rate ?? 0.1695;
+  const coh = AGE_COHORTS.find((c) => age >= c.min && age < c.max);
+  return (coh && stats?.cohort_rates_map?.[coh.cohort]?.rate) ?? stats?.global_issuance_rate ?? 0.1695;
+}
+
+export const cohortLaunchRate = cohortIssuanceRate;
+export const categoryLaunchRate = (cat, stats) => stats?.category_rates_map?.[cat ?? 'Uncategorised']?.smoothed_rate ?? stats?.global_issuance_rate ?? 0.1695;
+
+export function growthTiltOf(change7d, stats) {
+  const g = safeNum(change7d, 0), tier = g < 0 ? 'low' : g > 0 ? 'high' : 'mid';
+  const tierRate = stats?.growth_tilt?.[tier] ?? stats?.global_issuance_rate ?? 0.1695;
+  return stats?.global_issuance_rate > 0 ? tierRate / stats.global_issuance_rate : 1;
+}
+
+export function captureRateOf(protocol, stats, asOf) {
+  const logT = Math.log10(Math.max(1, protocol.tvl_usd || 1));
+  const g = safeNum(protocol.change_7d, 0) / 25;
   const age = ageDays(asOf, protocol.listed_at);
-  const capital = capitalFor(protocol);
-  const days = holdDaysFor(age);
-  const gas = gasFor(capital, days);
-  const cost = capital + gas;
-  const tvl = protocol.tvl_usd || 0;
-  const share = tvl > 0 ? Math.min(1, capital / tvl) : 0;
-  const expected = impliedValue * share;
-  const perDollar = cost > 0 ? expected / cost : 0;
-  const median = boardMedianPerDollar || 0.05;
-  const ratio = median > 0 ? perDollar / median : 0;
-  const verdict =
-    ratio >= 2 ? 'the best return on this board' :
-    ratio >= 1 ? 'better than the board median' :
-    ratio >= 0.5 ? 'below the board median' :
-    'thin: farm it small';
-  const steps = farmSteps(protocol, age, capital, gas, days);
+  const trackAge = (age !== null ? age : 540) / 1000;
+  const beta = stats.coefficients ?? [3.01459, -0.46817, -0.08012, -0.11999];
+  const linear = beta[0] + beta[1] * logT + beta[2] * g + beta[3] * trackAge;
+  const offset = categoryCaptureRate(protocol.category, stats);
+  const rawRatio = Math.pow(10, linear + offset);
+  const clamped = Math.min(stats.capture_rate_max ?? 14.5468, Math.max(stats.capture_rate_min ?? 0.0059, rawRatio));
+  const peers = stats.category_rates_map?.[protocol.category ?? 'Uncategorised']?.protocols ?? 0;
+  const w = Math.min(0.8, peers / (peers + 8));
+  return clamped * w + (stats.global_capture_rate ?? 0.246) * (1 - w);
+}
+
+export function launchOddsOf(protocol, stats, asOf) {
+  const catRate = categoryLaunchRate(protocol.category, stats);
+  const age = ageDays(asOf, protocol.listed_at);
+  const cohRate = cohortIssuanceRate(age, stats);
+  const baseRate = stats.global_issuance_rate ?? 0.1695;
+  const cohMult = (age !== null && baseRate > 0) ? Math.max(0.4, Math.min(2.5, cohRate / baseRate)) : 1;
+  const gMult = Math.max(0.4, Math.min(2.5, growthTiltOf(protocol.change_7d, stats)));
+  const probability = Math.max(0.005, Math.min(0.95, catRate * cohMult * gMult));
+  return { odds: probability, categoryRate: catRate, cohortRate: cohRate };
+}
+
+export function impliedValueOf(protocol, stats, asOf) {
+  const capture = captureRateOf(protocol, stats, asOf);
+  const oddsInfo = launchOddsOf(protocol, stats, asOf);
+  const valueIfLaunched = Math.max(1, Math.round((protocol.tvl_usd || 0) * capture));
+  const implied = Math.max(1, Math.round(valueIfLaunched * oddsInfo.odds));
+  return { impliedValue: implied, valueIfLaunched, capture, odds: oddsInfo.odds, categoryRate: oddsInfo.categoryRate, cohortRate: oddsInfo.cohortRate };
+}
+
+const computeCapitalNeeded = (tvl) => tvl >= 2e9 ? 400 : tvl >= 5e8 ? 250 : tvl >= 1e8 ? 150 : tvl >= 5e7 ? 100 : 50;
+const computeHoldingDays = (age) => age === null ? 45 : age < 180 ? 60 : age < 365 ? 45 : 30;
+const computeGasCost = (cap, days) => (cap >= 250 ? 8 : cap >= 100 ? 5 : 3) * Math.max(1, Math.round(days / 7)) + 3;
+
+export function farmPlanFor(protocol, impliedValue, age, medianPerDollar) {
+  const capital = computeCapitalNeeded(protocol.tvl_usd || 0), days = computeHoldingDays(age), gas = computeGasCost(capital, days), cost = capital + gas;
+  const share = protocol.tvl_usd > 0 ? Math.min(1, capital / protocol.tvl_usd) : 0;
+  const expectedValue = impliedValue * share;
+  const rawVpd = cost > 0 ? expectedValue / cost : 0;
+  const roundedVpd = Math.round(rawVpd * 1000) / 1000;
+  const ratio = medianPerDollar > 0 ? roundedVpd / medianPerDollar : 0;
+  const verdict = ratio >= 2 ? 'the best return on this board' : ratio >= 1 ? 'better than the board median' : ratio >= 0.5 ? 'below the board median' : 'thin: farm it small';
+  return { capital_usd: capital, gas_usd: gas, days, cost_usd: cost, expected_value_usd: Math.round(expectedValue * 100) / 100, value_per_dollar: roundedVpd, verdict };
+}
+
+const findPrimaryChain = (p) => p.chains?.[0] ?? 'its main chain';
+const ACTION_RULES = [
+  [/perpetual|derivative|basis trading|options/, (n, c, k) => `Post $${k} of margin on ${n} on ${c} and hold one small position open for the window.`],
+  [/lending|^cdp|collateral/, (n, c, k) => `Supply $${k} of USDC to ${n} on ${c}, borrow against part of it, and keep the position open.`],
+  [/dex|liquidity manager/, (n, c, k) => `Provide $${k} of liquidity to ${n}'s deepest pool on ${c} and keep the position open.`],
+  [/bridge/, (n, c, k) => `Bridge $${k} of USDC to ${c} through ${n} and use the bridged funds inside its own app.`],
+  [/staking|restak/, (n, c, k) => `Stake $${k} of the chain's staking asset through ${n} and keep the receipt.`],
+  [/yield aggregator|allocator|curator/, (n, c, k) => `Deposit $${k} into a ${n} vault on ${c} and hold the shares.`],
+  [/rwa/, (n, c, k) => `Mint $${k} of the protocol's yield asset on ${c} and hold it to the redemption date.`],
+  [/stablecoin|payments/, (n, c, k) => `Mint $${k} of the protocol's stable asset on ${c} and hold it in a second wallet.`],
+  [/insurance/, (n, c, k) => `Buy $${k} of cover from ${n} on ${c} and keep the policy open.`],
+];
+
+function generateActionPrompt(p, cap, chain) {
+  const cat = (p.category ?? '').toLowerCase();
+  for (const [pattern, handler] of ACTION_RULES) {
+    if (pattern.test(cat)) return handler(p.name, chain, cap);
+  }
+  return `Deposit $${cap} of USDC into ${p.name} on ${chain} and keep the position open.`;
+}
+
+export function farmSteps(p, age, farm) {
+  const chain = findPrimaryChain(p), cap = farm.capital_usd, hold = farm.days, halfGas = Math.round(farm.gas_usd / 2);
+  return [
+    { text: 'Open a fresh wallet that holds only the money you plan to farm, and keep its seed phrase offline and out of the browser.', cost: 'under $3 for the first transaction', time: '5 minutes' },
+    { text: generateActionPrompt(p, cap, chain), cost: `$${cap} of capital and about $${halfGas} of gas to set up`, time: '15 minutes to set up' },
+    { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote, so the protocol records activity from you.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
+    { text: `Hold the position for at least ${hold} days, so the activity is counted in more than one weekly snapshot.`, cost: `the $${cap} stays in the position`, time: `${hold} days` },
+    { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link the protocol publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
+    { text: 'Sell or unwind the position in one go on a day with little volume, so the price you get is close to the price you saw.', cost: `about $${halfGas} of gas to unwind`, time: '20 minutes' },
+    { text: 'Write the wallet, the dates and every transaction in a farm log, so you can repeat the position or unwind it cleanly.', cost: 'nothing but the log', time: '5 minutes' },
+  ];
+}
+
+export function stepText(step) {
+  let line = `${step.text} Cost: ${step.cost}. Time: ${step.time}.`;
+  if (line.length > 600) line = `${line.slice(0, 596)}...`;
+  if (line.length < 20) line = `${line} Keep the position and check the protocol's own page.`;
+  return line;
+}
+
+export function computeProtocol(protocol, stats, asOf, medianPerDollar) {
+  const age = ageDays(asOf, protocol.listed_at), val = impliedValueOf(protocol, stats, asOf);
+  const farm = farmPlanFor(protocol, val.impliedValue, age, medianPerDollar);
   return {
-    capital_usd: capital,
-    gas_usd: gas,
-    days: days,
-    cost_usd: cost,
-    expected_value_usd: Math.round(expected * 100) / 100,
-    value_per_dollar: Math.round(perDollar * 1000) / 1000,
-    verdict: verdict,
-    farm_steps: steps,
+    implied_value_usd: val.impliedValue, value_if_launched_usd: val.valueIfLaunched,
+    capture_rate: Math.round(val.capture * 1e4) / 1e4, launch_odds: Math.round(val.odds * 1e4) / 1e4,
+    category_rate: Math.round(val.categoryRate * 1e4) / 1e4, cohort_rate: Math.round(val.cohortRate * 1e4) / 1e4,
+    comparable_peers: stats.category_rates_map?.[protocol.category ?? 'Uncategorised']?.protocols ?? 0,
+    capital_usd: farm.capital_usd, gas_usd: farm.gas_usd, days: farm.days, cost_usd: farm.cost_usd,
+    expected_value_usd: farm.expected_value_usd, value_per_dollar: farm.value_per_dollar, verdict: farm.verdict,
+    farm_steps: farmSteps(protocol, age, farm).map(stepText),
   };
 }
 
-/**
- * Evaluates all model figures for a protocol and mutates/populates the row.
- */
-function computeProtocol(protocol, stats, asOf, boardMedianPerDollar) {
-  const age = ageDays(asOf, protocol.listed_at);
-  const valuation = impliedValueOf(protocol, stats, asOf);
-  const farm = farmPlanFor(protocol, valuation.impliedValue, asOf, boardMedianPerDollar);
-  const key = protocol.category || 'Uncategorised';
-  const peers = stats && stats.category_rates_map && stats.category_rates_map[key]
-    ? stats.category_rates_map[key].protocols
-    : (stats && stats.categories ? (stats.categories.find(function (c) { return c.category === key; }) || {}).protocols || 0 : 0);
-
-  protocol.age_days = age;
-  protocol.capture_rate = valuation.capture;
-  protocol.launch_odds = valuation.odds;
-  protocol.category_rate = valuation.categoryRate;
-  protocol.cohort_rate = valuation.cohortRate;
-  protocol.value_if_launched_usd = valuation.valueIfLaunched;
-  protocol.implied_value_usd = valuation.impliedValue;
-  protocol.comparable_peers = peers;
-  protocol.capital_usd = farm.capital_usd;
-  protocol.gas_usd = farm.gas_usd;
-  protocol.days = farm.days;
-  protocol.cost_usd = farm.cost_usd;
-  protocol.expected_value_usd = farm.expected_value_usd;
-  protocol.value_per_dollar = farm.value_per_dollar;
-  protocol.verdict = farm.verdict;
-  protocol.farm_steps = farm.farm_steps;
-  return protocol;
+export function liveRows(snapshot) {
+  return snapshot.protocols
+    .filter((p) => !isPreToken(p) && p.category !== 'CEX' && p.mcap_usd !== null)
+    .sort((a, b) => (b.mcap_usd ?? 0) - (a.mcap_usd ?? 0) || b.tvl_usd - a.tvl_usd)
+    .slice(0, 30)
+    .map((p) => ({
+      slug: p.slug, name: p.name, category: p.category, chains: p.chains,
+      tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd, change_7d: p.change_7d,
+      tvl_to_mcap: p.mcap_usd ? Math.round((p.tvl_usd / p.mcap_usd) * 100) / 100 : null,
+    }));
 }
 
-if (typeof window !== 'undefined') {
-  window.TokenRadarModel = {
-    ageDays: ageDays,
-    cohortLaunchRate: cohortLaunchRate,
-    categoryLaunchRate: categoryLaunchRate,
-    growthTiltOf: growthTiltOf,
-    categoryCaptureRate: categoryCaptureRate,
-    captureRateOf: captureRateOf,
-    launchOddsOf: launchOddsOf,
-    impliedValueOf: impliedValueOf,
-    capitalFor: capitalFor,
-    holdDaysFor: holdDaysFor,
-    gasFor: gasFor,
-    actionFor: actionFor,
-    farmSteps: farmSteps,
-    farmPlanFor: farmPlanFor,
-    computeProtocol: computeProtocol,
+function buildBoard(snapshot, fit) {
+  const protocolMap = new Map(snapshot.protocols.map((p) => [p.slug, p]));
+  const watchlistSet = new Set(snapshot.watchlist);
+  const selectedCandidates = [];
+
+  for (const slug of snapshot.watchlist) {
+    const p = protocolMap.get(slug);
+    if (p) selectedCandidates.push(p);
+  }
+
+  const WRAPPED_REGEXP = /\b(wrapped|staked|staking)\b/i;
+  const EXCLUDED_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
+  const CEX_REGEXP = /^(binance|coinbase|bybit|kraken|bitget|okx|bitfinex|gemini)/i;
+
+  const passesCandidateFilter = (p) => {
+    if (watchlistSet.has(p.slug) || !isRankable(p)) return false;
+    if (p.tvl_usd >= snapshot.floor_usd) {
+      if (
+        EXCLUDED_CATEGORIES.has(p.category ?? '') ||
+        WRAPPED_REGEXP.test(p.name) ||
+        CEX_REGEXP.test(p.name) ||
+        p.slug === 'wbtc' ||
+        p.slug === 'ccip'
+      ) return false;
+    }
+    return true;
   };
+
+  const remaining = snapshot.protocols
+    .filter(passesCandidateFilter)
+    .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
+
+  for (const p of remaining) selectedCandidates.push(p);
+
+  const scoredEntries = selectedCandidates.map((p) => {
+    const age = ageDays(snapshot.as_of, p.listed_at);
+    const val = impliedValueOf(p, fit.report, snapshot.as_of);
+    return { protocol: p, age, val, peers: fit.categoryRates.get(p.category ?? 'Uncategorised')?.protocols ?? 0 };
+  });
+
+  const eligible = scoredEntries.filter((e) => watchlistSet.has(e.protocol.slug) || e.val.impliedValue >= 25_000);
+  eligible.sort((a, b) => b.val.impliedValue - a.val.impliedValue || (a.protocol.slug < b.protocol.slug ? -1 : a.protocol.slug > b.protocol.slug ? 1 : 0));
+
+  const rows = eligible.slice(0, 400).map((e, index) => {
+    const farm = farmPlanFor(e.protocol, e.val.impliedValue, e.age, 0);
+    return {
+      rank: index + 1, slug: e.protocol.slug, name: e.protocol.name, category: e.protocol.category, chains: e.protocol.chains,
+      tvl_usd: e.protocol.tvl_usd, change_7d: e.protocol.change_7d, mcap_usd: e.protocol.mcap_usd, listed_at: e.protocol.listed_at,
+      gecko_id: e.protocol.gecko_id, symbol: e.protocol.symbol, token_status: 'pre-token', age_days: e.age, implied_value_usd: e.val.impliedValue,
+      model: {
+        capture_rate: Math.round(e.val.capture * 1e4) / 1e4, launch_odds: Math.round(e.val.odds * 1e4) / 1e4,
+        category_rate: Math.round(e.val.categoryRate * 1e4) / 1e4, cohort_rate: Math.round(e.val.cohortRate * 1e4) / 1e4,
+        value_if_launched_usd: e.val.valueIfLaunched, comparable_peers: e.peers,
+      },
+      farm, farm_steps: farmSteps(e.protocol, e.age, farm).map(stepText),
+    };
+  });
+
+  const medianReturnPerDollar = computeMedian(rows.map((r) => r.farm.value_per_dollar));
+  fit.report.board_median_per_dollar = Math.round(medianReturnPerDollar * 1000) / 1000;
+  for (const row of rows) {
+    const ratio = medianReturnPerDollar > 0 ? row.farm.value_per_dollar / medianReturnPerDollar : 0;
+    row.farm.verdict = ratio >= 2 ? 'the best return on this board' : ratio >= 1 ? 'better than the board median' : ratio >= 0.5 ? 'below the board median' : 'thin: farm it small';
+  }
+  return rows;
 }
 
-var _modelExport = {
-  ageDays: ageDays,
-  cohortLaunchRate: cohortLaunchRate,
-  categoryLaunchRate: categoryLaunchRate,
-  growthTiltOf: growthTiltOf,
-  categoryCaptureRate: categoryCaptureRate,
-  captureRateOf: captureRateOf,
-  launchOddsOf: launchOddsOf,
-  impliedValueOf: impliedValueOf,
-  capitalFor: capitalFor,
-  holdDaysFor: holdDaysFor,
-  gasFor: gasFor,
-  actionFor: actionFor,
-  farmSteps: farmSteps,
-  farmPlanFor: farmPlanFor,
-  computeProtocol: computeProtocol,
-};
+export function buildRadar(snapshot) {
+  const fit = calibrateSnapshot(snapshot);
+  const board = buildBoard(snapshot, fit);
+  const live = liveRows(snapshot);
+  const watchlistSet = new Set(snapshot.watchlist);
 
-if (typeof window !== 'undefined') {
-  window.TokenRadarModel = _modelExport;
+  const radarRows = board.map((r) => ({
+    rank: r.rank, slug: r.slug, name: r.name, category: r.category, chains: r.chains,
+    tvl_usd: r.tvl_usd, change_7d: r.change_7d, listed_at: r.listed_at, age_days: r.age_days,
+    implied_value_usd: r.implied_value_usd, value_if_launched_usd: r.model.value_if_launched_usd,
+    capture_rate: r.model.capture_rate, launch_odds: r.model.launch_odds, category_rate: r.model.category_rate,
+    cohort_rate: r.model.cohort_rate, comparable_peers: r.model.comparable_peers,
+    capital_usd: r.farm.capital_usd, gas_usd: r.farm.gas_usd, days: r.farm.days, cost_usd: r.farm.cost_usd,
+    expected_value_usd: r.farm.expected_value_usd, value_per_dollar: r.farm.value_per_dollar,
+    verdict: r.farm.verdict, farm_steps: r.farm_steps, on_watchlist: watchlistSet.has(r.slug),
+  }));
+
+  const radar = {
+    as_of: snapshot.as_of, source: snapshot.source, floor_usd: snapshot.floor_usd,
+    model: fit.report, model_version: 'radar-4', watchlist_size: snapshot.watchlist.length,
+    board_size: board.length, early_size: board.filter((r) => !watchlistSet.has(r.slug)).length,
+    live_size: live.length, rows: radarRows, live,
+  };
+
+  return { board, radar };
 }
-if (typeof globalThis !== 'undefined') {
-  globalThis.TokenRadarModel = _modelExport;
+
+export function parseSnapshot(jsonText) {
+  let parsed;
+  try { parsed = JSON.parse(jsonText); } catch { throw new SnapshotError('snapshot.json is not valid JSON'); }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new SnapshotError('snapshot.json must be an object');
+  if (typeof parsed.as_of !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(parsed.as_of)) throw new SnapshotError('snapshot.json missing valid as_of date string');
+  if (typeof parsed.source !== 'string') throw new SnapshotError('snapshot.json missing source description');
+  if (typeof parsed.floor_usd !== 'number' || !Number.isSafeInteger(parsed.floor_usd) || parsed.floor_usd <= 0) throw new SnapshotError('snapshot.json missing positive integer floor_usd');
+  if (!Array.isArray(parsed.protocols)) throw new SnapshotError('snapshot.json missing protocols array');
+  if (!Array.isArray(parsed.watchlist) || parsed.watchlist.some((s) => typeof s !== 'string')) throw new SnapshotError('snapshot.json missing watchlist slug array');
+
+  const protocols = parsed.protocols.map((p, idx) => {
+    if (!p || typeof p !== 'object' || Array.isArray(p)) throw new SnapshotError(`Protocol at index ${idx} is not an object`);
+    if (typeof p.slug !== 'string' || typeof p.name !== 'string' || typeof p.tvl_usd !== 'number' || !Array.isArray(p.chains)) {
+      throw new SnapshotError(`Protocol ${p.slug || idx} missing core fields`);
+    }
+    return {
+      slug: p.slug, name: p.name, category: typeof p.category === 'string' ? p.category : null,
+      chains: p.chains.filter((c) => typeof c === 'string'), tvl_usd: p.tvl_usd,
+      change_7d: typeof p.change_7d === 'number' && Number.isFinite(p.change_7d) ? p.change_7d : null,
+      mcap_usd: typeof p.mcap_usd === 'number' && Number.isFinite(p.mcap_usd) ? p.mcap_usd : null,
+      listed_at: typeof p.listed_at === 'string' ? p.listed_at : null,
+      gecko_id: typeof p.gecko_id === 'string' ? p.gecko_id : null,
+      symbol: typeof p.symbol === 'string' ? p.symbol : null,
+    };
+  });
+
+  return { as_of: parsed.as_of, source: parsed.source, floor_usd: parsed.floor_usd, protocols, watchlist: parsed.watchlist };
 }
-if (typeof module !== 'undefined' && module.exports) {
-  module.exports = _modelExport;
+
+export function dataScript(radar) {
+  return `window.RADAR=${JSON.stringify(radar)};\n`;
+}
+
+export function boardIssue(board, snapshot) {
+  const slugs = new Set(board.map((r) => r.slug));
+  const missing = snapshot.watchlist.filter((s) => !slugs.has(s));
+  if (missing.length > 0) return `the board misses ${missing.length} watchlist slug${missing.length === 1 ? '' : 's'}: ${missing.slice(0, 5).join(', ')}`;
+  const ranks = board.map((r) => r.rank).sort((a, b) => a - b);
+  for (let i = 0; i < ranks.length; i++) if (ranks[i] !== i + 1) return `rank ${i + 1} is ${ranks[i]}`;
+  for (let i = 1; i < board.length; i++) {
+    if (board[i].implied_value_usd > board[i - 1].implied_value_usd) return `row ${i + 1} outranks row ${i} on implied value`;
+  }
+  if (board.length >= 2 && board[0].implied_value_usd === board[board.length - 1].implied_value_usd) {
+    return `all ${board.length} rows share the same implied value: a board that ranks nothing by value is not a ranking`;
+  }
+  for (const row of board) {
+    const steps = row.farm_steps;
+    if (steps.length < 3 || steps.length > 12) return `${row.slug} has ${steps.length} farm steps`;
+    for (const step of steps) {
+      if (step.length < 20 || step.length > 600) return `${row.slug} has a farm step of ${step.length} characters`;
+    }
+    if (!Number.isSafeInteger(row.implied_value_usd) || row.implied_value_usd <= 0) return `${row.slug} has implied value ${row.implied_value_usd}`;
+  }
+  return null;
 }

@@ -12,7 +12,7 @@
     <span class="mark"></span>
     <div>
       <h1>Token Radar</h1>
-      <p class="tagline" id="asof">Loading the snapshot&hellip;</p>
+      <p class="tagline" id="asof">Loading snapshot data&hellip;</p>
     </div>
   </div>
   <nav class="tabs" role="tablist">
@@ -21,41 +21,24 @@
     <button class="tab" data-view="model" role="tab">How it is built</button>
   </nav>
 </header>
-
 <main>
   <section class="panel" id="view-board">
     <div class="controls">
-      <label class="search">
-        <span>Search</span>
-        <input type="search" id="q" placeholder="name, category or chain" autocomplete="off">
-      </label>
-      <label>
-        <span>Category</span>
-        <select id="category"><option value="">All categories</option></select>
-      </label>
-      <label>
-        <span>Chain</span>
-        <select id="chain"><option value="">All chains</option></select>
-      </label>
-      <label class="toggle">
-        <input type="checkbox" id="watchlist-only">
-        <span>Watchlist only</span>
-      </label>
-      <label>
-        <span>Sort by</span>
-        <select id="sort">
-          <option value="rank">Implied value</option>
-          <option value="tvl_usd">TVL</option>
-          <option value="change_7d">7-day change</option>
-          <option value="age_days">Time running</option>
-          <option value="launch_odds">Launch odds</option>
-          <option value="capture_rate">Capture rate</option>
-          <option value="value_per_dollar">Return per dollar farmed</option>
-        </select>
-      </label>
+      <label class="search"><span>Search</span><input type="search" id="q" placeholder="name, category or chain" autocomplete="off"></label>
+      <label><span>Category</span><select id="category"><option value="">All categories</option></select></label>
+      <label><span>Chain</span><select id="chain"><option value="">All chains</option></select></label>
+      <label class="toggle"><input type="checkbox" id="watchlist-only"><span>Watchlist only</span></label>
+      <label><span>Sort by</span><select id="sort">
+        <option value="rank">Implied value</option>
+        <option value="tvl_usd">TVL</option>
+        <option value="change_7d">7-day change</option>
+        <option value="age_days">Time running</option>
+        <option value="launch_odds">Launch odds</option>
+        <option value="capture_rate">Capture rate</option>
+        <option value="value_per_dollar">Return per dollar farmed</option>
+      </select></label>
       <p class="count" id="count"></p>
     </div>
-
     <div class="table-wrap">
       <table>
         <thead>
@@ -76,12 +59,9 @@
       </table>
     </div>
     <p class="note">
-      Capture is what share of TVL the token would be worth if it issued; odds is how likely the
-      token is at all. The board ranks their product. Return / $1 is what one dollar of the plan below
-  returns, from the same numbers.
+      Capture is what share of TVL the token would be worth if it issued; odds is how likely the token is at all. The board ranks their product. Return / $1 is what one dollar of the plan below returns, from the same numbers.
     </p>
   </section>
-
   <section class="panel" id="view-live" hidden>
     <div class="table-wrap">
       <table>
@@ -100,96 +80,47 @@
     </div>
     <p class="note" id="live-note"></p>
   </section>
-
   <section class="panel" id="view-model" hidden>
     <h2>How the board is built</h2>
-    <p class="lead">
-      Every row is one protocol from the sealed snapshot of
-      <span id="model-asof"></span>, and every number on the board comes out of that file. Nothing
-      here is a list of protocol names written by hand.
-    </p>
+    <p class="lead">Every row is one protocol from the sealed snapshot of <span id="model-asof"></span>, and every number on the board comes out of that file. Nothing here is a list of protocol names written by hand.</p>
     <p class="formula">implied value = launch odds &times; ( TVL &times; capture rate )</p>
-
     <h3>1. The curve is fitted on the snapshot's own tokens</h3>
-    <p class="note">
-      The <span id="model-comps"></span> protocols of the snapshot that already carry a token state a
-      market cap against their TVL. Five candidate models predict that ratio from the snapshot's own
-      figures; each one is scored by leave-one-out error, the median percentage it missed a
-      comparable's ratio by when it was predicted from the others. The winner is the model the board
-      runs.
-    </p>
+    <p class="note">The <span id="model-comps"></span> protocols of the snapshot that already carry a token state a market cap against their TVL. Five candidate models predict that ratio from the snapshot's own figures; each one is scored by leave-one-out error, the median percentage it missed a comparable's ratio by when it was predicted from the others. The winner is the model the board runs.</p>
     <div class="table-wrap">
       <table class="compact">
-        <thead>
-          <tr>
-            <th class="col-name">Candidate</th>
-            <th>Reads</th>
-            <th class="col-num">LOO median error</th>
-            <th class="col-num">LOO mean error</th>
-          </tr>
-        </thead>
+        <thead><tr><th class="col-name">Candidate</th><th>Reads</th><th class="col-num">LOO median error</th><th class="col-num">LOO mean error</th></tr></thead>
         <tbody id="candidate-rows"></tbody>
       </table>
     </div>
-
     <h3>2. Launch odds come from the issuance record</h3>
-    <p class="note">
-      The odds of a token are the share of protocols in the same category that already carry one,
-      smoothed towards the global share when the category is small, then tilted by the cohort of
-      protocols that have been tracked for as long as this one has.
-    </p>
+    <p class="note">The odds of a token are the share of protocols in the same category that already carry one, smoothed towards the global share when the category is small, then tilted by the cohort of protocols that have been tracked for as long as this one has.</p>
     <div class="two-col">
       <div class="table-wrap">
         <table class="compact">
-          <thead>
-            <tr>
-              <th class="col-name">Category</th>
-              <th class="col-num">Protocols</th>
-              <th class="col-num">With token</th>
-              <th class="col-num">Issue rate</th>
-            </tr>
-          </thead>
+          <thead><tr><th class="col-name">Category</th><th class="col-num">Protocols</th><th class="col-num">With token</th><th class="col-num">Issue rate</th></tr></thead>
           <tbody id="category-rows"></tbody>
         </table>
       </div>
       <div class="table-wrap">
         <table class="compact">
-          <thead>
-            <tr>
-              <th class="col-name">Tracked for</th>
-              <th class="col-num">Protocols</th>
-              <th class="col-num">With token</th>
-              <th class="col-num">Issue rate</th>
-            </tr>
-          </thead>
+          <thead><tr><th class="col-name">Tracked for</th><th class="col-num">Protocols</th><th class="col-num">With token</th><th class="col-num">Issue rate</th></tr></thead>
           <tbody id="cohort-rows"></tbody>
         </table>
       </div>
     </div>
-
     <h3>3. The plan under each row is costed</h3>
-    <p class="note">
-      Capital, gas and days come from the protocol's own size and age; the return comes from the
-      same implied value, taken pro-rata over the share of the protocol's book the position
-      represents.
-    </p>
+    <p class="note">Capital, gas and days come from the protocol's own size and age; the return comes from the same implied value, taken pro-rata over the share of the protocol's book the position represents.</p>
     <dl class="model" id="model-terms"></dl>
     <p class="note" id="model-notes"></p>
-    <p class="note">
-      A board's implied value is its own claim, not make.fun's, and it is not a prediction that a
-      token will be issued or when. Protocols whose token already trades are kept out of the board
-      and shown separately, with the market's own numbers.
-    </p>
+    <p class="note">A board's implied value is its own claim, not make.fun's, and it is not a prediction that a token will be issued or when. Protocols whose token already trades are kept out of the board and shown separately, with the market's own numbers.</p>
   </section>
 </main>
-
 <aside class="detail" id="detail" hidden>
   <button class="close" id="close-detail" aria-label="Close">&times;</button>
   <div id="detail-body"></div>
 </aside>
-
 <script src="../data.js"></script>
-<script src="./model.js"></script>
-<script src="./app.js"></script>
+<script type="module" src="./model.js"></script>
+<script type="module" src="./app.js"></script>
 </body>
 </html>
