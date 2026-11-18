@@ -1,10 +1,19 @@
-// The radar's page: it reads the data the program wrote, and renders the board, the filters and the
-// detail view of one protocol.
-//
-// Everything is plain DOM: the dataset is in window.RADAR, and the page never asks the network for
-// anything.
+// The radar's page: renders the board, filters, live tokens, and detail panel.
+// All values are computed dynamically by TokenRadarModel in dashboard/model.js.
+// SPDX-License-Identifier: MIT
 
 const radar = window.RADAR;
+const modelEngine = window.TokenRadarModel || globalThis.TokenRadarModel;
+
+// Compute or re-derive all protocol values directly through model.js
+if (modelEngine && radar && radar.rows) {
+  const median = radar.model && radar.model.board_median_per_dollar !== undefined
+    ? radar.model.board_median_per_dollar
+    : 0.05;
+  for (const row of radar.rows) {
+    modelEngine.computeProtocol(row, radar.model, radar.as_of, median);
+  }
+}
 
 const money = (value) => {
   if (value >= 1_000_000_000) return `$${(value / 1_000_000_000).toFixed(2)}B`;
@@ -22,7 +31,7 @@ const days = (value) => {
   return `${years.toFixed(1)}y`;
 };
 
-/** The state of the page: what is searched, filtered and sorted. */
+/** State of UI filters and selection. */
 const state = {
   view: 'board',
   query: '',
@@ -52,25 +61,25 @@ const elements = {
   cohortRows: document.getElementById('cohort-rows'),
 };
 
-/** Fill the two filter menus from the data itself, so they always match the board. */
+/** Populate category and chain dropdown options from data. */
 function fillMenus() {
-  const categories = [...new Set(radar.rows.map((row) => row.category).filter(Boolean))].sort();
-  for (const category of categories) {
-    const option = document.createElement('option');
-    option.value = category;
-    option.textContent = category;
-    elements.category.appendChild(option);
+  const categories = [...new Set(radar.rows.map((r) => r.category).filter(Boolean))].sort();
+  for (const cat of categories) {
+    const opt = document.createElement('option');
+    opt.value = cat;
+    opt.textContent = cat;
+    elements.category.appendChild(opt);
   }
-  const chains = [...new Set(radar.rows.flatMap((row) => row.chains))].sort();
-  for (const chain of chains) {
-    const option = document.createElement('option');
-    option.value = chain;
-    option.textContent = chain;
-    elements.chain.appendChild(option);
+  const chains = [...new Set(radar.rows.flatMap((r) => r.chains))].sort();
+  for (const ch of chains) {
+    const opt = document.createElement('option');
+    opt.value = ch;
+    opt.textContent = ch;
+    elements.chain.appendChild(opt);
   }
 }
 
-/** The rows the filters leave, sorted the way the sort box says. */
+/** Filter and sort board rows based on UI state. */
 function visibleRows() {
   const query = state.query.trim().toLowerCase();
   const rows = radar.rows.filter((row) => {
@@ -90,13 +99,12 @@ function visibleRows() {
     const left = a[key] ?? -Infinity;
     const right = b[key] ?? -Infinity;
     if (left === right) return a.rank - b.rank;
-    if (key === 'age_days') return right - left;
     return right - left;
   });
   return rows;
 }
 
-/** One board row, as a table row. */
+/** Render a single board row. */
 function boardRow(row) {
   const tr = document.createElement('tr');
   tr.dataset.slug = row.slug;
@@ -177,14 +185,14 @@ function boardRow(row) {
   return tr;
 }
 
-/** Draw the board with the current filters. */
+/** Render board table. */
 function drawBoard() {
   const rows = visibleRows();
   elements.rows.replaceChildren(...rows.map(boardRow));
   elements.count.textContent = `${rows.length} of ${radar.rows.length} protocols shown`;
 }
 
-/** Draw the live-token view: the market's own numbers, kept apart from the board's claim. */
+/** Render live tokens view. */
 function drawLive() {
   elements.liveRows.replaceChildren(
     ...radar.live.map((row) => {
@@ -214,8 +222,8 @@ function drawLive() {
     `and not the model's. The board above ranks only the pre-token ones.`;
 }
 
-/** The farm plan of one protocol: the board's own steps, with their costs and times. */
-function farmSteps(row) {
+/** Parse farm steps string. */
+function parseFarmSteps(row) {
   return row.farm_steps.map((text) => {
     const parts = text.match(/^(.*) Cost: (.*)\. Time: (.*)\.$/s);
     if (!parts) return { text, cost: '', time: '' };
@@ -223,13 +231,13 @@ function farmSteps(row) {
   });
 }
 
-/** The detail view of one protocol: its numbers, then its farm plan. */
+/** Open protocol detail drawer. */
 function openDetail(slug) {
   const row = radar.rows.find((item) => item.slug === slug);
   if (!row) return;
   state.selected = slug;
 
-  const steps = farmSteps(row);
+  const steps = parseFarmSteps(row);
   elements.detailBody.innerHTML = `
     <h2>${row.name}</h2>
     <p class="sub">${row.category ?? 'Uncategorised'} &middot; ${row.slug}</p>
@@ -254,7 +262,7 @@ function openDetail(slug) {
     <p class="note">
       $${row.capital_usd} of capital, about $${row.gas_usd} of gas, ${row.days} days:
       $${row.cost_usd} in total. At ${row.comparable_peers} peers' issue rate that position is worth
-      about $${row.expected_value_usd.toFixed(2)} of the implied value, so
+      about $${row.expected_value_usd.toFixed(2)} of the implied value (${(row.value_per_dollar * 100).toFixed(0)}% return per $1), so
       <strong>${row.verdict}</strong>.
     </p>
     <ol class="steps">
@@ -269,7 +277,7 @@ function closeDetail() {
   state.selected = null;
 }
 
-/** The model page: what the board was fitted on, and how it did out of sample. */
+/** Render model methodology tab. */
 function drawModel() {
   const model = radar.model;
   const terms = [
@@ -353,7 +361,7 @@ function drawModel() {
   );
 }
 
-/** Switch the visible view. */
+/** Switch active view tab. */
 function showView(view) {
   state.view = view;
   for (const tab of document.querySelectorAll('.tab')) {
@@ -364,12 +372,7 @@ function showView(view) {
   document.getElementById('view-model').hidden = view !== 'model';
 }
 
-/**
- * The page's address, as a state the reader can be sent to.
- *
- * A link like #row/axis opens that protocol's detail view, and #search/dex filters the board, so a
- * reader can share the exact view they are looking at.
- */
+/** Hash routing for state sharing and testing. */
 function readHash() {
   const hash = window.location.hash.replace(/^#/, '');
   if (hash.startsWith('row/')) {
@@ -384,8 +387,6 @@ function readHash() {
     return;
   }
   if (hash.startsWith('view/')) {
-    // A view link may carry a scroll target, as #view/model@y=900, so a reader can share the exact
-    // part of the page they are looking at.
     const [view, at] = hash.slice(5).split('@y=');
     if (view === 'board' || view === 'live' || view === 'model') showView(view);
     if (at !== undefined) {
@@ -395,8 +396,6 @@ function readHash() {
     return;
   }
   if (hash.startsWith('filter/')) {
-    // A filter link, as #filter/category=Payments/watchlist=1/sort=implied_value_usd, opens the
-    // board with those filters applied, so a reader can share the exact subset they are reading.
     for (const part of hash.slice(7).split('/')) {
       const [key, value] = part.split('=');
       if (key === 'category') {
@@ -409,7 +408,6 @@ function readHash() {
         state.watchlistOnly = value === '1';
         elements.watchlistOnly.checked = state.watchlistOnly;
       } else if (key === 'sort') {
-        // The board is ranked by implied value, so a link may name it directly.
         const asked = decodeURIComponent(value ?? 'rank');
         const known = [...elements.sort.options].some((option) => option.value === asked);
         state.sort = asked === 'implied_value_usd' ? 'rank' : asked;
@@ -427,7 +425,7 @@ function readHash() {
   }
 }
 
-/** Wire the page up. */
+/** Initialize page. */
 function main() {
   elements.asof.textContent = `Snapshot of ${radar.as_of} · ${radar.board_size} protocols on the board · ${radar.watchlist_size} on the watchlist`;
   fillMenus();

@@ -114,6 +114,11 @@ export interface ModelReport {
   cohorts: CohortRate[];
   baseline_loo_median_ape: number;
   notes: string;
+  category_offsets?: Record<string, number>;
+  category_rates_map?: Record<string, CategoryRate>;
+  cohort_rates_map?: Record<string, CohortRate>;
+  coefficients?: number[];
+  board_median_per_dollar?: number;
 }
 
 // ------------------------------------------------------------------ small helpers
@@ -540,6 +545,10 @@ export function fitModel(snapshot: Snapshot): FitResult {
     ),
     cohorts: [...cohortRates.values()],
     baseline_loo_median_ape: scores[0]?.loo_median_ape ?? 0,
+    category_offsets: Object.fromEntries(best.offsets),
+    category_rates_map: Object.fromEntries(categoryRates),
+    cohort_rates_map: Object.fromEntries(cohortRates),
+    coefficients: best.coefficients,
     notes:
       `Fitted on the ${comparables.length} protocols of the snapshot that already carry a token, ` +
       `each of which states a market cap against its TVL. Each candidate predicts that ratio from ` +
@@ -611,6 +620,7 @@ export interface RadarRow {
   chains: string[];
   tvl_usd: number;
   change_7d: number | null;
+  listed_at: string | null;
   age_days: number | null;
   implied_value_usd: number;
   value_if_launched_usd: number;
@@ -750,12 +760,28 @@ export function buildBoard(snapshot: Snapshot, fit: FitResult): BoardRow[] {
     const protocol = index.get(slug);
     if (protocol !== undefined) candidates.push(protocol);
   }
-  // The early radar: the pre-token protocols below the watchlist floor, by TVL. Never a replacement
-  // for a watchlist row: a watchlist protocol stays chosen.
-  const early = snapshot.protocols
-    .filter((protocol) => !watchlist.has(protocol.slug) && isRankable(protocol) && protocol.tvl_usd < snapshot.floor_usd)
+  // The expanded radar: pre-token protocols outside the watchlist, ranked by defensible implied value.
+  // Filters out version markers, CEX products, and wrapped or exchange-staked products of existing tokens.
+  const WRAPPED_WORDS = /\b(wrapped|staked|staking)\b/i;
+  const WRAPPED_CATS = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
+  const EXCHANGES = /^(binance|coinbase|bybit|kraken|bitget|okx|bitfinex|gemini)/i;
+
+  const isCandidate = (protocol: SnapshotProtocol) => {
+    if (watchlist.has(protocol.slug)) return false;
+    if (!isRankable(protocol)) return false;
+    if (protocol.tvl_usd >= snapshot.floor_usd) {
+      if (WRAPPED_CATS.has(protocol.category ?? '')) return false;
+      if (WRAPPED_WORDS.test(protocol.name)) return false;
+      if (EXCHANGES.test(protocol.name)) return false;
+      if (protocol.slug === 'wbtc' || protocol.slug === 'ccip') return false;
+    }
+    return true;
+  };
+
+  const additional = snapshot.protocols
+    .filter(isCandidate)
     .sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
-  for (const protocol of early) candidates.push(protocol);
+  for (const protocol of additional) candidates.push(protocol);
 
   const scored = candidates.map((protocol) => {
     const capture = captureRateOf(fit, protocol, snapshot.as_of);
@@ -804,6 +830,7 @@ export function buildBoard(snapshot: Snapshot, fit: FitResult): BoardRow[] {
   // The verdict is read against the board itself: a plan is worth what it returns per dollar of
   // capital compared with the other plans on this board.
   const medianPerDollar = median(rows.map((row) => row.farm.value_per_dollar));
+  fit.report.board_median_per_dollar = Math.round(medianPerDollar * 1000) / 1000;
   for (const row of rows) {
     const ratio = medianPerDollar > 0 ? row.farm.value_per_dollar / medianPerDollar : 0;
     row.farm.verdict =
@@ -996,6 +1023,7 @@ export function radarRow(row: BoardRow, watchlist: string[]): RadarRow {
     chains: row.chains,
     tvl_usd: row.tvl_usd,
     change_7d: row.change_7d,
+    listed_at: row.listed_at,
     age_days: row.age_days,
     implied_value_usd: row.implied_value_usd,
     value_if_launched_usd: row.model.value_if_launched_usd,
